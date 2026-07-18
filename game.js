@@ -38,9 +38,16 @@ const G = {
 const NET = {
   ws: null,              // LAN transport (node server.js relay)
   peer: null,            // online transport (WebRTC via PeerJS)
-  conn: null,            // guest side: the single channel to the host
-  guests: new Map(),     // host side, online mode: gid -> DataConnection
+  conn: null,            // guest side: reliable channel to the host
+  fast: null,            // guest side: unreliable channel (state/input stream)
+  joinCode: null,
+  guests: new Map(),     // host side, online mode: gid -> reliable conn
+  fastGuests: new Map(), // host side: gid -> unreliable conn
   inputs: new Map(),     // host side: gid -> latest input
+  inputSeqs: new Map(),  // host side: gid -> last input seq (drop stale)
+  inSeq: 0,              // guest side: outgoing input seq
+  lastSeq: 0,            // guest side: newest state seq received
+  snaps: [],             // guest side: buffered snapshots for interpolation
   lan: false,            // true when the local relay server is reachable
   connected: false,
   role: null,
@@ -163,7 +170,7 @@ if (IS_TOUCH) {
 }
 
 // ---- tilt controls (gyro to move, tap anywhere to jump) ----
-const tilt = { dir: 0, tap: false, seen: false, t: 0, cal: 0, holdA: 90 };
+const tilt = { ax: 0, tap: false, seen: false, listening: false, t: 0, cal: 0, holdA: 90 };
 let controlScheme = localStorage.getItem("slimeControls") || "buttons";
 
 function orientationHandler(e) {
@@ -189,15 +196,24 @@ function orientationHandler(e) {
   const rightG = tilt.holdA === 90 ? -gy : gy;
   tilt.t = (Math.asin(Math.max(-1, Math.min(1, rightG))) * 180) / Math.PI;
 
-  const DEAD = 8; // degrees of tilt (from the calibrated neutral) before moving
+  // analog steering: dead zone, then speed scales with tilt up to FULL degrees
+  const DEAD = 3.5, FULL = 17;
   const d = tilt.t - tilt.cal;
-  tilt.dir = d > DEAD ? 1 : d < -DEAD ? -1 : 0;
+  // drift the neutral point very slowly while the phone is held still-ish,
+  // so a shifting grip doesn't require re-starting the game
+  if (Math.abs(d) < 3) tilt.cal += (tilt.t - tilt.cal) * 0.004;
+  const mag = Math.min(1, Math.max(0, (Math.abs(d) - DEAD) / (FULL - DEAD)));
+  tilt.ax = Math.sign(d) * mag;
 }
 
 function enableTilt() {
   return new Promise((resolve) => {
+    if (tilt.seen) { resolve(true); return; }
     const attach = () => {
-      addEventListener("deviceorientation", orientationHandler);
+      if (!tilt.listening) {
+        addEventListener("deviceorientation", orientationHandler);
+        tilt.listening = true;
+      }
       // some browsers silently deliver no events (e.g. over http) — verify
       setTimeout(() => resolve(tilt.seen), 900);
     };
@@ -235,15 +251,23 @@ function wasdInput() {
 function arrowInput() {
   return { left: !!keys["ArrowLeft"], right: !!keys["ArrowRight"], jump: !!keys["ArrowUp"] };
 }
-// any control scheme + touch/tilt — used when only one local player
+// any control scheme + touch/tilt — used when only one local player.
+// ax is an analog axis in [-1, 1]; buttons/keys override tilt at full speed.
 function combinedInput() {
   const a = wasdInput(), b = arrowInput();
-  const useTilt = controlScheme === "tilt";
-  return {
-    left: a.left || b.left || touch.l || (useTilt && tilt.dir === -1),
-    right: a.right || b.right || touch.r || (useTilt && tilt.dir === 1),
-    jump: a.jump || b.jump || touch.j || (useTilt && tilt.tap),
-  };
+  const left = a.left || b.left || touch.l;
+  const right = a.right || b.right || touch.r;
+  const jump = a.jump || b.jump || touch.j || (controlScheme === "tilt" && tilt.tap);
+  let ax;
+  if (left) ax = -1;
+  else if (right) ax = 1;
+  else if (controlScheme === "tilt" && tilt.seen) ax = tilt.ax;
+  return { left, right, jump, ax };
+}
+
+// re-arm the gyro on a user gesture (iOS forgets the permission on reload)
+function armTilt() {
+  if (IS_TOUCH && controlScheme === "tilt" && !tilt.seen) enableTilt();
 }
 
 // ================= AI =================
@@ -315,8 +339,12 @@ function aiSoccer() {
 function stepSlime(s, input) {
   const sp = SLIME_SPEED * (s.speedMul || 1);
   s.vx = 0;
-  if (input.left) s.vx = -sp;
-  if (input.right) s.vx = sp;
+  if (typeof input.ax === "number") {
+    s.vx = sp * Math.max(-1, Math.min(1, input.ax)); // analog (tilt)
+  } else {
+    if (input.left) s.vx = -sp;
+    if (input.right) s.vx = sp;
+  }
 
   if (input.jump && s.y >= FLOOR_Y) s.vy = JUMP_VEL;
   s.vy += GRAVITY;
@@ -471,6 +499,7 @@ async function goLandscape() {
 
 function startGame(mode) {
   if (IS_TOUCH) goLandscape();
+  armTilt(); // user gesture: re-request gyro permission if iOS dropped it
   tilt.cal = tilt.t; // however the phone is held right now = neutral
   G.mode = mode;
   if (mode === "1p" || mode === "2p") roster = defaultRoster();
@@ -483,6 +512,8 @@ function startGame(mode) {
   G.freeze = 0;
   G.flash = null;
   NET.lastState = null;
+  NET.snaps = [];
+  NET.lastSeq = 0;
   resetRally(0);
   hideAllScreens();
   $("btnPause").classList.remove("hidden");
@@ -632,9 +663,16 @@ function hostMsg(gid, msg) {
       renderLobby();
       break;
     }
-    case "input":
-      NET.inputs.set(gid, { left: !!msg.l, right: !!msg.r, jump: !!msg.j });
+    case "input": {
+      const q = msg.q || 0;
+      if (q && q <= (NET.inputSeqs.get(gid) || 0)) break; // stale (unordered)
+      NET.inputSeqs.set(gid, q);
+      NET.inputs.set(gid, {
+        left: !!msg.l, right: !!msg.r, jump: !!msg.j,
+        ax: typeof msg.a === "number" ? msg.a : undefined,
+      });
       break;
+    }
     case "pauseReq":
       togglePause();
       break;
@@ -711,6 +749,8 @@ function handleNetMessage(msg) {
     case "joined":
       if (msg.game) G.type = msg.game;
       NET.myGid = msg.gid ?? null;
+      // open the unreliable fast lane for the state/input stream (online mode)
+      if (!NET.lan && NET.peer && NET.myGid != null && NET.joinCode) openFastChannel(NET.myGid);
       chosenTeam = null;
       updateTeamUI(null);
       showScreen("teamScreen");
@@ -735,7 +775,11 @@ function handleNetMessage(msg) {
       $("joinStatus").textContent = msg.reason || "Something went wrong.";
       break;
     case "state":
+      if (msg.q && msg.q <= NET.lastSeq) break; // stale (unordered channel)
+      NET.lastSeq = msg.q || NET.lastSeq;
       NET.lastState = msg;
+      NET.snaps.push({ at: performance.now(), p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz });
+      if (NET.snaps.length > 30) NET.snaps.shift();
       break;
     case "end":
       endGame(msg.w);
@@ -755,6 +799,18 @@ function handleNetMessage(msg) {
       showScreen("dcScreen");
       break;
   }
+}
+
+function openFastChannel(gid) {
+  const fc = NET.peer.connect(PEER_PREFIX + NET.joinCode, {
+    reliable: false,
+    metadata: { fast: true, gid },
+  });
+  NET.fast = fc;
+  fc.on("data", (d) => { if (d && typeof d === "object") handleNetMessage(d); });
+  const gone = () => { if (NET.fast === fc) NET.fast = null; };
+  fc.on("close", gone);
+  fc.on("error", gone);
 }
 
 // guest team-select screen: reflect lobby counts and own choice
@@ -778,21 +834,16 @@ function updateTeamUI(lobbyMsg) {
 // ---- online transport: WebRTC peer-to-peer, PeerJS cloud for the handshake ----
 const PEER_PREFIX = "slime-games-errie15-";
 
-// STUN finds a direct route; the free TURN relay is the fallback that makes
-// phone-to-phone across different networks (CGNAT mobile carriers) work.
+// STUN finds a direct route between peers. A TURN relay (credentials below,
+// when configured) is the fallback that makes phone-to-phone across
+// different networks (CGNAT mobile carriers) work — without one, players on
+// e.g. 5G vs WiFi often cannot connect.
+const TURN_SERVERS = []; // e.g. [{ urls: ["turn:host:443"], username: "...", credential: "..." }]
 const PEER_OPTS = {
   config: {
     iceServers: [
       { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-      {
-        urls: [
-          "turn:openrelay.metered.ca:80",
-          "turn:openrelay.metered.ca:443",
-          "turn:openrelay.metered.ca:443?transport=tcp",
-        ],
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
+      ...TURN_SERVERS,
     ],
   },
 };
@@ -806,8 +857,12 @@ function randomCode() {
 
 function cleanupPeer() {
   for (const conn of NET.guests.values()) { try { conn.close(); } catch {} }
+  for (const conn of NET.fastGuests.values()) { try { conn.close(); } catch {} }
   NET.guests = new Map();
+  NET.fastGuests = new Map();
   NET.inputs = new Map();
+  NET.inputSeqs = new Map();
+  if (NET.fast) { try { NET.fast.close(); } catch {} NET.fast = null; }
   if (NET.conn) { try { NET.conn.close(); } catch {} NET.conn = null; }
   if (NET.peer) { try { NET.peer.destroy(); } catch {} NET.peer = null; }
 }
@@ -839,6 +894,22 @@ function peerHost(attempt = 0) {
   });
   peer.on("connection", (conn) => {
     if (NET.peer !== peer) return;
+    const meta = conn.metadata || {};
+    if (meta.fast) {
+      // second, unreliable channel from an existing guest — for state/input
+      const fgid = meta.gid;
+      conn.on("open", () => {
+        if (!NET.guests.has(fgid)) { conn.close(); return; }
+        NET.fastGuests.set(fgid, conn);
+      });
+      conn.on("data", (d) => {
+        if (d && typeof d === "object" && NET.fastGuests.get(fgid) === conn) hostMsg(fgid, d);
+      });
+      const fgone = () => { if (NET.fastGuests.get(fgid) === conn) NET.fastGuests.delete(fgid); };
+      conn.on("close", fgone);
+      conn.on("error", fgone);
+      return;
+    }
     if (NET.guests.size >= 3 || G.running) { // room full / match in progress
       conn.on("open", () => conn.close());
       return;
@@ -868,6 +939,7 @@ function peerJoin(code) {
   if (typeof Peer === "undefined") { $("joinStatus").textContent = "peerjs.min.js is missing."; return; }
   cleanupPeer();
   NET.role = "guest";
+  NET.joinCode = code;
   const peer = new Peer(PEER_OPTS);
   NET.peer = peer;
   let opened = false;
@@ -949,14 +1021,12 @@ $("btnControls").onclick = async () => {
   localStorage.setItem("slimeControls", controlScheme);
   applyControlScheme();
 };
-// restore a saved tilt preference (may need a fresh permission tap on iPhone)
+// restore a saved tilt preference; iPhone forgets the permission on reload,
+// so if this silent attempt fails we re-arm on the next tap (armTilt) instead
+// of falling back to buttons
 if (IS_TOUCH && controlScheme === "tilt") {
   enableTilt().then((ok) => {
-    if (!ok) {
-      controlScheme = "buttons";
-      applyControlScheme();
-      $("ctrlHint").textContent = "Tap CONTROLS to re-enable tilt.";
-    }
+    if (!ok) $("ctrlHint").textContent = "Tilt activates when you start a game.";
   });
 }
 
@@ -994,8 +1064,8 @@ $("hostRed").onclick = () => {
 $("hostBlue").onclick = () => {
   if (teamCount(1) - (LOBBY.hostTeam === 1 ? 1 : 0) < 2) { LOBBY.hostTeam = 1; syncHostTeamUI(); broadcastLobby(); renderLobby(); }
 };
-$("teamRed").onclick = () => { chosenTeam = 0; netSend({ t: "team", team: 0 }); updateTeamUI(NET.lastLobby); };
-$("teamBlue").onclick = () => { chosenTeam = 1; netSend({ t: "team", team: 1 }); updateTeamUI(NET.lastLobby); };
+$("teamRed").onclick = () => { armTilt(); chosenTeam = 0; netSend({ t: "team", team: 0 }); updateTeamUI(NET.lastLobby); };
+$("teamBlue").onclick = () => { armTilt(); chosenTeam = 1; netSend({ t: "team", team: 1 }); updateTeamUI(NET.lastLobby); };
 $("btnLeaveTeam").onclick = backToMenu;
 $("btnMenu").onclick = backToMenu;
 $("btnDcMenu").onclick = backToMenu;
@@ -1007,7 +1077,10 @@ $("btnQuit").onclick = backToMenu;
 function update() {
   if (G.mode === "guest") {
     const i = combinedInput();
-    netSend({ t: "input", l: i.left, r: i.right, j: i.jump });
+    const msg = { t: "input", l: i.left, r: i.right, j: i.jump, q: ++NET.inSeq };
+    if (typeof i.ax === "number") msg.a = Math.round(i.ax * 100) / 100;
+    if (NET.fast && NET.fast.open) NET.fast.send(msg); // low-latency lane
+    else netSend(msg);
     return; // guest doesn't simulate — it renders host snapshots
   }
 
@@ -1052,32 +1125,56 @@ function update() {
   if (G.mode === "host") sendSnapshot();
 }
 
+let stateSeq = 0;
 function sendSnapshot() {
   const rnd = (v) => Math.round(v * 10) / 10;
-  netSendAll({
+  const obj = {
     t: "state",
+    q: ++stateSeq,
     p: slimes.map((s) => [rnd(s.x), rnd(s.y)]),
     b: [rnd(ball.x), rnd(ball.y)],
     sc: G.score,
     fl: G.flash,
     fz: G.freeze,
-  });
+  };
+  if (NET.lan) {
+    netSendAll(obj);
+  } else {
+    // prefer each guest's unreliable fast lane; fall back to the reliable one
+    for (const [gid, conn] of NET.guests) {
+      const f = NET.fastGuests.get(gid);
+      const ch = f && f.open ? f : conn;
+      if (ch && ch.open) ch.send(obj);
+    }
+  }
 }
 
 // what to draw this frame (live sim, or the latest network snapshot)
 function view() {
-  if (G.mode === "guest" && NET.lastState) {
-    const st = NET.lastState;
+  if (G.mode === "guest" && NET.snaps.length) {
+    // render ~80ms behind the newest snapshot, interpolating between the two
+    // surrounding ones — smooths network jitter into fluid motion
+    const S = NET.snaps;
+    const newest = S[S.length - 1];
+    const target = performance.now() - 80;
+    let s0 = S[0], s1 = newest;
+    for (let i = S.length - 1; i >= 0; i--) {
+      if (S[i].at <= target) { s0 = S[i]; s1 = S[i + 1] || S[i]; break; }
+    }
+    const span = s1.at - s0.at;
+    const f = span > 0 ? Math.min(1, Math.max(0, (target - s0.at) / span)) : 1;
+    const L = (a, b) => a + (b - a) * f;
     return {
-      slimes: st.p.map((p, i) => ({
-        x: p[0], y: p[1],
+      slimes: newest.p.map((_, i) => ({
+        x: s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : newest.p[i][0],
+        y: s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : newest.p[i][1],
         side: roster[i] ? roster[i].team : 0,
         color: roster[i] ? roster[i].color : "#fff",
       })),
-      ball: { x: st.b[0], y: st.b[1] },
-      score: st.sc,
-      flash: st.fl,
-      freeze: st.fz,
+      ball: { x: L(s0.b[0], s1.b[0]), y: L(s0.b[1], s1.b[1]) },
+      score: newest.sc,
+      flash: newest.fl,
+      freeze: newest.fz,
     };
   }
   return { slimes, ball, score: G.score, flash: G.flash, freeze: G.freeze };
