@@ -1350,5 +1350,17 @@ requestAnimationFrame(loop);
 
 // offline support: after one online visit the game loads with no connection
 if ("serviceWorker" in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.register("sw.js").then((reg) => {
+    // when an update finishes installing, refresh once so the new version is
+    // live immediately — but never in the middle of a game
+    reg.addEventListener("updatefound", () => {
+      const nw = reg.installing;
+      if (!nw) return;
+      nw.addEventListener("statechange", () => {
+        if (nw.state === "activated" && navigator.serviceWorker.controller && !G.running) {
+          location.reload();
+        }
+      });
+    });
+  }).catch(() => {});
 }
