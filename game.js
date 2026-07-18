@@ -897,7 +897,16 @@ const PEER_PREFIX = "slime-games-errie15-";
 // when configured) is the fallback that makes phone-to-phone across
 // different networks (CGNAT mobile carriers) work — without one, players on
 // e.g. 5G vs WiFi often cannot connect.
-const TURN_SERVERS = []; // e.g. [{ urls: ["turn:host:443"], username: "...", credential: "..." }]
+const TURN_SERVERS = [{
+  urls: [
+    "turn:global.relay.metered.ca:80",
+    "turn:global.relay.metered.ca:80?transport=tcp",
+    "turn:global.relay.metered.ca:443",
+    "turns:global.relay.metered.ca:443?transport=tcp",
+  ],
+  username: "942766cbd6343c1fae686e0d",
+  credential: "+fDHgGH91CzUa6si",
+}];
 const PEER_OPTS = {
   config: {
     iceServers: [
