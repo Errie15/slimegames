@@ -181,6 +181,10 @@ let gyroSens = parseInt(localStorage.getItem("slimeGyroSens"), 10);
 if (!(gyroSens >= 1 && gyroSens <= 10)) gyroSens = 5;
 function gyroFullAngle() { return 30 - gyroSens * 2.2; } // 1 -> ~28°, 10 -> 8°
 
+// response curve: "linear" = speed exactly proportional to tilt;
+// "dynamic" = gentle near center, ramping up toward full tilt
+let gyroCurve = localStorage.getItem("slimeGyroCurve") === "dynamic" ? "dynamic" : "linear";
+
 function orientationHandler(e) {
   if (e.gamma === null && e.beta === null) return;
   tilt.seen = true;
@@ -204,14 +208,15 @@ function orientationHandler(e) {
   const rightG = tilt.holdA === 90 ? -gy : gy;
   tilt.t = (Math.asin(Math.max(-1, Math.min(1, rightG))) * 180) / Math.PI;
 
-  // analog steering: dead zone, then speed scales with tilt up to FULL degrees
+  // analog steering: small dead zone, then speed scales with tilt up to FULL
   const FULL = gyroFullAngle();
-  const DEAD = Math.min(3.5, FULL * 0.3);
+  const DEAD = 1.2;
   const d = tilt.t - tilt.cal;
-  // drift the neutral point very slowly while the phone is held still-ish,
-  // so a shifting grip doesn't require re-starting the game
-  if (Math.abs(d) < 3) tilt.cal += (tilt.t - tilt.cal) * 0.004;
-  const mag = Math.min(1, Math.max(0, (Math.abs(d) - DEAD) / (FULL - DEAD)));
+  // re-center only when truly neutral, and very slowly — must never eat a
+  // small intentional tilt
+  if (Math.abs(d) < 0.8) tilt.cal += (tilt.t - tilt.cal) * 0.002;
+  let mag = Math.min(1, Math.max(0, (Math.abs(d) - DEAD) / (FULL - DEAD)));
+  if (gyroCurve === "dynamic") mag = Math.pow(mag, 1.8); // fine control near center
   tilt.ax = Math.sign(d) * mag;
 }
 
@@ -1099,6 +1104,16 @@ $("sensSlider").addEventListener("input", () => {
   localStorage.setItem("slimeGyroSens", gyroSens);
   armTilt(); // slider drag is a gesture — good moment to (re)enable the gyro
 });
+function syncCurveBtn() {
+  $("btnCurve").textContent = "MOVEMENT: " + (gyroCurve === "dynamic" ? "DYNAMIC" : "LINEAR");
+}
+$("btnCurve").onclick = () => {
+  gyroCurve = gyroCurve === "dynamic" ? "linear" : "dynamic";
+  localStorage.setItem("slimeGyroCurve", gyroCurve);
+  syncCurveBtn();
+  armTilt();
+};
+syncCurveBtn();
 
 // ================= update =================
 function update() {
