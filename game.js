@@ -51,6 +51,10 @@ const NET = {
   myIdx: -1,             // guest side: index of own slime in the roster
   gapEma: 40,            // guest side: smoothed ms between snapshots
   lastAt: 0,
+  rtt: 0,                // smoothed round-trip time, ms
+  route: null,           // "DIRECT" | "RELAY" once known
+  ballR: null,           // guest side: smoothed rendered ball position
+  pingT: 0,
   lan: false,            // true when the local relay server is reachable
   connected: false,
   role: null,
@@ -616,6 +620,8 @@ function startGame(mode) {
   NET.lastSeq = 0;
   NET.lastAt = 0;
   NET.gapEma = 40;
+  NET.ballR = null;
+  NET.pingT = 0;
   NET.myIdx = mode === "guest" ? roster.findIndex((e) => e.gid === NET.myGid) : -1;
   resetRally(0);
   hideAllScreens();
@@ -780,7 +786,45 @@ function hostMsg(gid, msg) {
     case "pauseReq":
       togglePause();
       break;
+    case "ping": { // latency probe from a guest — echo it back
+      const f = NET.fastGuests.get(gid);
+      if (f && f.open) f.send({ t: "pong", ts: msg.ts });
+      else netSendTo(gid, { t: "pong", ts: msg.ts });
+      break;
+    }
+    case "pong":
+      trackRtt(msg.ts);
+      break;
   }
+}
+
+function trackRtt(ts) {
+  const rtt = performance.now() - ts;
+  NET.rtt = NET.rtt ? NET.rtt * 0.7 + rtt * 0.3 : rtt;
+}
+
+// which route did WebRTC pick? (relay = via the TURN server, even on LAN
+// when the router blocks device-to-device traffic)
+function pollRoute() {
+  const dc = NET.role === "host"
+    ? (NET.fastGuests.values().next().value || NET.guests.values().next().value)
+    : (NET.fast || NET.conn);
+  const pc = dc && dc.peerConnection;
+  if (!pc || !pc.getStats) return;
+  pc.getStats().then((stats) => {
+    let pairId = null, localId = null;
+    stats.forEach((s) => {
+      if (s.type === "transport" && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId;
+    });
+    stats.forEach((s) => {
+      if ((pairId && s.id === pairId) || (!pairId && s.type === "candidate-pair" && s.selected)) {
+        localId = s.localCandidateId;
+      }
+    });
+    stats.forEach((s) => {
+      if (s.id === localId) NET.route = s.candidateType === "relay" ? "RELAY" : "DIRECT";
+    });
+  }).catch(() => {});
 }
 
 function hostStart() {
@@ -899,6 +943,13 @@ function handleNetMessage(msg) {
       G.paused = msg.on;
       if (msg.on) placeGyroPanel("gyroSlotPause");
       $("pauseScreen").classList.toggle("hidden", !msg.on);
+      break;
+    case "ping": // latency probe from the host — echo it back
+      if (NET.fast && NET.fast.open) NET.fast.send({ t: "pong", ts: msg.ts });
+      else netSend({ t: "pong", ts: msg.ts });
+      break;
+    case "pong":
+      trackRtt(msg.ts);
       break;
     case "peer-left":
       G.running = false;
@@ -1225,6 +1276,12 @@ function update() {
     if (NET.fast && NET.fast.open) NET.fast.send(msg); // low-latency lane
     else netSend(msg);
     predictSelf(i); // own slime moves instantly; the host stays authoritative
+    NET.pingT++;
+    if (NET.pingT % 90 === 0) {
+      const p = { t: "ping", ts: performance.now() };
+      if (NET.fast && NET.fast.open) NET.fast.send(p); else netSend(p);
+    }
+    if (NET.pingT % 180 === 0 && !NET.lan) pollRoute();
     return;
   }
 
@@ -1266,7 +1323,20 @@ function update() {
   slimeCollisions();
   stepBall();
 
-  if (G.mode === "host") sendSnapshot();
+  if (G.mode === "host") {
+    sendSnapshot();
+    NET.pingT++;
+    if (NET.pingT % 90 === 0) {
+      const gid = NET.lan ? null : NET.guests.keys().next().value;
+      const p = { t: "ping", ts: performance.now() };
+      if (NET.lan) netSendAll(p);
+      else if (gid !== undefined) {
+        const f = NET.fastGuests.get(gid);
+        if (f && f.open) f.send(p); else netSendTo(gid, p);
+      }
+    }
+    if (NET.pingT % 180 === 0 && !NET.lan) pollRoute();
+  }
 }
 
 // Client-side prediction: the guest simulates its OWN slime locally every
@@ -1296,7 +1366,7 @@ function sendSnapshot() {
     t: "state",
     q: ++stateSeq,
     p: slimes.map((s) => [rnd(s.x), rnd(s.y)]),
-    b: [rnd(ball.x), rnd(ball.y)],
+    b: [rnd(ball.x), rnd(ball.y), rnd(ball.vx), rnd(ball.vy)],
     sc: G.score,
     fl: G.flash,
     fz: G.freeze,
@@ -1342,13 +1412,40 @@ function view() {
           color: roster[i] ? roster[i].color : "#fff",
         };
       }),
-      ball: { x: L(s0.b[0], s1.b[0]), y: L(s0.b[1], s1.b[1]) },
+      ball: reckonBall(newest, s0, s1, L),
       score: newest.sc,
       flash: newest.fl,
       freeze: newest.fz,
     };
   }
   return { slimes, ball, score: G.score, flash: G.flash, freeze: G.freeze };
+}
+
+// Dead reckoning: instead of showing the ball a network-trip in the past,
+// project it forward from the newest snapshot using its velocity + gravity,
+// canceling most of the perceived lag. Smoothed to hide bounce mispredictions.
+function reckonBall(newest, s0, s1, L) {
+  let bx, by;
+  const nb = newest.b;
+  if (nb.length >= 4 && newest.fz === 0) {
+    const aheadMs = (performance.now() - newest.at) + (NET.rtt || 30) / 2;
+    const f = Math.min(8, aheadMs / (1000 / 60)); // frames ahead, capped
+    const g = cfg().ballGrav;
+    const r = cfg().ballR;
+    bx = nb[0] + nb[2] * f;
+    by = nb[1] + nb[3] * f + 0.5 * g * f * f;
+    bx = Math.max(r, Math.min(W - r, bx));
+    by = Math.max(r, Math.min(FLOOR_Y - r, by));
+  } else {
+    bx = L(s0.b[0], s1.b[0]);
+    by = L(s0.b[1], s1.b[1]);
+  }
+  if (NET.ballR) {
+    bx = NET.ballR.x + (bx - NET.ballR.x) * 0.5;
+    by = NET.ballR.y + (by - NET.ballR.y) * 0.5;
+  }
+  NET.ballR = { x: bx, y: by };
+  return { x: bx, y: by };
 }
 
 // ================= rendering =================
@@ -1464,6 +1561,13 @@ function draw() {
   ctx.stroke();
 
   drawScore(v);
+
+  // connection quality readout during network games
+  if ((G.mode === "host" || G.mode === "guest") && G.running && NET.rtt) {
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.font = "12px 'Courier New', monospace";
+    ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}`, 12, H - 10);
+  }
 
   if (v.flash !== null && v.flash !== undefined && v.freeze > 0) {
     ctx.fillStyle = "#ffe14d";
