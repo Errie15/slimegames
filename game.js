@@ -929,7 +929,7 @@ const PEER_OPTS = {
 };
 
 function randomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // letters only
   let s = "";
   for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
@@ -1068,10 +1068,11 @@ function joinFlow() {
 }
 
 function doJoin() {
-  // forgiving input: any case, ignore spaces/junk, map look-alike characters
-  const code = $("codeInput").value.toUpperCase().replace(/[^A-Z0-9]/g, "")
-    .replace(/0/g, "Q").replace(/O/g, "Q").replace(/1/g, "L").replace(/I/g, "L");
-  if (code.length !== 4) { $("joinStatus").textContent = "Code is 4 characters."; return; }
+  // forgiving input: any case, ignore spaces/junk, map digit look-alikes
+  const code = $("codeInput").value.toUpperCase()
+    .replace(/0/g, "O").replace(/1/g, "I").replace(/5/g, "S").replace(/8/g, "B")
+    .replace(/[^A-Z]/g, "");
+  if (code.length !== 4) { $("joinStatus").textContent = "Code is 4 letters."; return; }
   $("joinStatus").textContent = "connecting…";
   if (NET.lan) {
     NET.role = "guest";

@@ -165,7 +165,7 @@ function send(c, data, opcode = 1) {
 const rooms = new Map(); // code -> { host, guests: Map<gid, client>, game, nextGid }
 
 function newCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // letters only
   let s = "";
   for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return rooms.has(s) ? newCode() : s;
