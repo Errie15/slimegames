@@ -37,13 +37,19 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 16px;
     background: rgba(5, 5, 15, 0.85);
     border-radius: 6px;
     text-align: center;
     padding: 20px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
+  /* auto margins center the content when it fits, and allow scrolling
+     to reach everything when it doesn't */
+  .overlay > :first-child { margin-top: auto; }
+  .overlay > :last-child { margin-bottom: auto; }
   .overlay.hidden { display: none; }
   h1 {
     font-size: 42px;
@@ -134,17 +140,49 @@
   #tRight { left: 17%; }
   #tJump { right: 0.5%; }
 
+  /* in-game pause button: bottom-center of the ground strip, clear of both
+     the score and the touch controls */
+  #btnPause {
+    position: absolute;
+    bottom: 1.2%;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 0;
+    height: 9%;
+    aspect-ratio: 1;
+    padding: 0;
+    border-radius: 50%;
+    font-size: clamp(10px, 2.4vmin, 16px);
+    background: rgba(20, 20, 40, 0.55);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.85);
+  }
+  #btnPause.hidden { display: none; }
+
   /* portrait phones: render the whole app (menus and game) rotated 90° so it
      is always landscape — works even with the phone's rotation lock on */
   @media (orientation: portrait) and (pointer: coarse) {
     #wrap { transform: rotate(90deg); }
     canvas { max-width: 94vh; max-height: 96vw; }
   }
+
+  /* small screens: tighten the menus so everything fits */
+  @media (max-height: 540px), ((max-width: 540px) and (orientation: portrait)) {
+    h1 { font-size: 28px; }
+    h2 { font-size: 19px; }
+    .overlay { gap: 9px; padding: 12px; }
+    button { font-size: 14px; padding: 8px 18px; min-width: 220px; }
+    button.small, button.diff { min-width: 0; font-size: 12px; padding: 6px 14px; }
+    .controls { font-size: 11px; line-height: 1.6; }
+    #roomCode { font-size: 40px; letter-spacing: 12px; }
+    #codeInput { font-size: 24px; width: 180px; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="game" width="1000" height="640"></canvas>
+  <button id="btnPause" class="hidden">&#10074;&#10074;</button>
 
   <!-- main menu: pick a game -->
   <div class="overlay" id="menu">
@@ -189,7 +227,8 @@
   <!-- join screen -->
   <div class="overlay hidden" id="joinScreen">
     <h2>ENTER ROOM CODE</h2>
-    <input id="codeInput" maxlength="4" autocomplete="off" spellcheck="false">
+    <input id="codeInput" maxlength="4" autocomplete="off" spellcheck="false"
+           autocapitalize="characters" autocorrect="off">
     <div id="joinStatus"></div>
     <button id="btnDoJoin">JOIN</button>
     <button class="small" id="btnBackJoin">&larr; BACK</button>
@@ -206,7 +245,9 @@
   <!-- pause -->
   <div class="overlay hidden" id="pauseScreen">
     <h2>PAUSED</h2>
-    <div class="hint">press P to resume</div>
+    <button id="btnResume">RESUME</button>
+    <button class="small" id="btnQuit">QUIT TO MENU</button>
+    <div class="hint">or press P to resume</div>
   </div>
 
   <!-- disconnect -->

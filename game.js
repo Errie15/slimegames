@@ -446,6 +446,7 @@ function startGame(mode) {
   NET.lastState = null;
   resetRally(0);
   hideAllScreens();
+  $("btnPause").classList.remove("hidden");
 }
 
 function playerNames() {
@@ -459,6 +460,7 @@ function playerNames() {
 
 function endGame(winner) {
   G.running = false;
+  $("btnPause").classList.add("hidden");
   const n = playerNames();
   $("winText").textContent = n[winner] === "YOU" ? "YOU WIN! \u{1F3C6}"
     : n[winner] + (n[winner].endsWith("S") ? " WIN!" : " WINS!");
@@ -469,7 +471,8 @@ function endGame(winner) {
 }
 
 function togglePause() {
-  if (!G.running || G.mode === "guest") return;
+  if (!G.running) return;
+  if (G.mode === "guest") { netSend({ t: "pauseReq" }); return; } // host decides
   G.paused = !G.paused;
   $("pauseScreen").classList.toggle("hidden", !G.paused);
   if (G.mode === "host") netSend({ t: "pause", on: G.paused });
@@ -478,6 +481,7 @@ function togglePause() {
 function backToMenu() {
   G.running = false;
   G.paused = false;
+  $("btnPause").classList.add("hidden");
   if (NET.ws) { NET.ws.close(); NET.ws = null; }
   cleanupPeer();
   NET.connected = false;
@@ -555,8 +559,13 @@ function handleNetMessage(msg) {
         $("pauseScreen").classList.toggle("hidden", !msg.on);
       }
       break;
+    case "pauseReq":
+      if (G.mode === "host") togglePause();
+      break;
     case "peer-left":
       G.running = false;
+      G.paused = false;
+      $("btnPause").classList.add("hidden");
       $("dcReason").textContent = "The other player disconnected.";
       showScreen("dcScreen");
       break;
@@ -565,6 +574,25 @@ function handleNetMessage(msg) {
 
 // ---- online transport: WebRTC peer-to-peer, PeerJS cloud for the handshake ----
 const PEER_PREFIX = "slime-games-errie15-";
+
+// STUN finds a direct route; the free TURN relay is the fallback that makes
+// phone-to-phone across different networks (CGNAT mobile carriers) work.
+const PEER_OPTS = {
+  config: {
+    iceServers: [
+      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+      {
+        urls: [
+          "turn:openrelay.metered.ca:80",
+          "turn:openrelay.metered.ca:443",
+          "turn:openrelay.metered.ca:443?transport=tcp",
+        ],
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+    ],
+  },
+};
 
 function randomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -589,7 +617,7 @@ function peerHost(attempt = 0) {
   cleanupPeer();
   NET.role = "host";
   const code = randomCode();
-  const peer = new Peer(PEER_PREFIX + code);
+  const peer = new Peer(PEER_PREFIX + code, PEER_OPTS);
   NET.peer = peer;
   $("roomCode").textContent = "----";
   $("hostUrl").textContent = "connecting…";
@@ -622,21 +650,23 @@ function peerJoin(code) {
   if (typeof Peer === "undefined") { $("joinStatus").textContent = "peerjs.min.js is missing."; return; }
   cleanupPeer();
   NET.role = "guest";
-  const peer = new Peer();
+  const peer = new Peer(PEER_OPTS);
   NET.peer = peer;
   let opened = false;
   peer.on("open", () => {
     if (NET.peer !== peer) return;
+    $("joinStatus").textContent = "found the room — connecting to opponent…";
     const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
     NET.conn = conn;
     wireConn(conn);
     conn.on("open", () => { opened = true; }); // host then sends {t:"joined", game}
+    // cross-network connections relayed through TURN can take a while
     setTimeout(() => {
       if (!opened && NET.peer === peer) {
-        $("joinStatus").textContent = "Could not reach that room — check the code.";
+        $("joinStatus").textContent = "Could not reach that room — check the code and try again.";
         cleanupPeer();
       }
-    }, 10000);
+    }, 25000);
   });
   peer.on("error", (err) => {
     if (NET.peer !== peer) return;
@@ -668,8 +698,10 @@ function joinFlow() {
 }
 
 function doJoin() {
-  const code = $("codeInput").value.trim().toUpperCase();
-  if (code.length !== 4) { $("joinStatus").textContent = "Code is 4 letters."; return; }
+  // forgiving input: any case, ignore spaces/junk, map look-alike characters
+  const code = $("codeInput").value.toUpperCase().replace(/[^A-Z0-9]/g, "")
+    .replace(/0/g, "Q").replace(/O/g, "Q").replace(/1/g, "L").replace(/I/g, "L");
+  if (code.length !== 4) { $("joinStatus").textContent = "Code is 4 characters."; return; }
   $("joinStatus").textContent = "connecting…";
   if (NET.lan) {
     NET.role = "guest";
@@ -739,6 +771,9 @@ $("btnRematch").onclick = () => {
 };
 $("btnMenu").onclick = backToMenu;
 $("btnDcMenu").onclick = backToMenu;
+$("btnPause").onclick = togglePause;
+$("btnResume").onclick = togglePause;
+$("btnQuit").onclick = backToMenu;
 
 // ================= update =================
 function update() {
