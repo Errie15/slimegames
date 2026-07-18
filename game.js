@@ -37,6 +37,10 @@ const G = {
   flash: null,           // side that just scored
   rallyT: 0,             // frames since the current rally started
   speed: 6.5,            // slime speed for the active match (host decides online)
+  awaitServe: false,     // between rounds: everyone must press jump to continue
+  ready: new Set(),      // players who have confirmed
+  armed: new Set(),      // players who released jump since the round ended
+  readyTotal: 0,
 };
 
 const NET = {
@@ -620,6 +624,9 @@ function startGame(mode) {
   G.paused = false;
   G.freeze = 0;
   G.flash = null;
+  G.awaitServe = false;
+  G.ready.clear();
+  G.armed.clear();
   NET.lastState = null;
   NET.snaps = [];
   NET.lastSeq = 0;
@@ -935,7 +942,7 @@ function handleNetMessage(msg) {
       const now = performance.now();
       if (NET.lastAt) NET.gapEma = NET.gapEma * 0.9 + Math.min(200, now - NET.lastAt) * 0.1;
       NET.lastAt = now;
-      NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz });
+      NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz, aw: msg.aw, rd: msg.rd, tot: msg.tot });
       if (NET.snaps.length > 30) NET.snaps.shift();
       break;
     }
@@ -1303,13 +1310,32 @@ function update() {
   if (G.freeze > 0) {
     G.freeze--;
     if (G.freeze === 0) {
-      G.flash = null;
       const winner = G.score.findIndex((s) => s >= cfg().win);
       if (winner !== -1) {
+        G.flash = null;
         if (G.mode === "host") { sendSnapshot(); netSendAll({ t: "end", w: winner }); }
         endGame(winner);
         return;
       }
+      // everyone confirms before the next round starts
+      G.awaitServe = true;
+      G.ready.clear();
+      G.armed.clear();
+    }
+    if (G.mode === "host") sendSnapshot();
+    return;
+  }
+
+  if (G.awaitServe) {
+    const parts = participants();
+    G.readyTotal = parts.length;
+    for (const p of parts) {
+      if (!p.jump) G.armed.add(p.key);              // must release jump first…
+      else if (G.armed.has(p.key)) G.ready.add(p.key); // …then press = ready
+    }
+    if (parts.length && parts.every((p) => G.ready.has(p.key))) {
+      G.awaitServe = false;
+      G.flash = null;
       resetRally(G.server);
     }
     if (G.mode === "host") sendSnapshot();
@@ -1364,7 +1390,7 @@ function predictSelf(input) {
   const st = NET.lastState;
   const sp = st && st.p[NET.myIdx];
   if (!sp) return;
-  if (st.fz > 0) { // rally reset: snap to the server's spawn position
+  if (st.fz > 0 || st.aw) { // rally frozen / waiting for ready: follow server
     s.x = sp[0]; s.y = sp[1]; s.vx = 0; s.vy = 0;
     return;
   }
@@ -1372,6 +1398,26 @@ function predictSelf(input) {
   const d2 = ex * ex + ey * ey;
   if (d2 > 120 * 120) { s.x = sp[0]; s.y = sp[1]; }          // way off: snap
   else if (d2 > 24 * 24) { s.x += ex * 0.22; s.y += ey * 0.22; } // drifted: blend
+}
+
+// who has to confirm before the next round
+function participants() {
+  if (G.mode === "host") {
+    const out = [{ key: "host", jump: combinedInput().jump }];
+    for (const e of roster) {
+      if (e.gid === null) continue;
+      const connected = NET.lan ? LOBBY.players.has(e.gid) : NET.guests.has(e.gid);
+      if (connected) out.push({ key: e.gid, jump: !!(NET.inputs.get(e.gid) || {}).jump });
+    }
+    return out;
+  }
+  if (G.mode === "2p") {
+    return [
+      { key: "p1", jump: wasdInput().jump || touch.j },
+      { key: "p2", jump: arrowInput().jump },
+    ];
+  }
+  return [{ key: "p1", jump: combinedInput().jump }]; // 1p (the bot is always ready)
 }
 
 let stateSeq = 0;
@@ -1385,6 +1431,9 @@ function sendSnapshot() {
     sc: G.score,
     fl: G.flash,
     fz: G.freeze,
+    aw: G.awaitServe ? 1 : 0,
+    rd: G.ready.size,
+    tot: G.readyTotal,
   };
   if (NET.lan) {
     netSendAll(obj);
@@ -1431,9 +1480,15 @@ function view() {
       score: newest.sc,
       flash: newest.fl,
       freeze: newest.fz,
+      await: !!newest.aw,
+      rd: newest.rd || 0,
+      tot: newest.tot || 0,
     };
   }
-  return { slimes, ball, score: G.score, flash: G.flash, freeze: G.freeze };
+  return {
+    slimes, ball, score: G.score, flash: G.flash, freeze: G.freeze,
+    await: G.awaitServe, rd: G.ready.size, tot: G.readyTotal,
+  };
 }
 
 // Dead reckoning: instead of showing the ball a network-trip in the past,
@@ -1584,7 +1639,7 @@ function draw() {
     ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}`, 12, H - 10);
   }
 
-  if (v.flash !== null && v.flash !== undefined && v.freeze > 0) {
+  if (v.flash !== null && v.flash !== undefined && (v.freeze > 0 || v.await)) {
     ctx.fillStyle = "#ffe14d";
     ctx.font = "bold 28px 'Courier New', monospace";
     ctx.textAlign = "center";
@@ -1592,6 +1647,14 @@ function draw() {
     const who = (G.mode === "host" || G.mode === "guest")
       ? teamName(v.flash) : playerNames()[v.flash];
     ctx.fillText(`${word} — ${who}`, W / 2, 120);
+    ctx.textAlign = "left";
+  }
+
+  if (v.await) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 22px 'Courier New', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(`NEXT ROUND — PRESS JUMP WHEN READY (${v.rd}/${v.tot})`, W / 2, 170);
     ctx.textAlign = "left";
   }
 }

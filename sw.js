@@ -1,6 +1,6 @@
 // Service worker: caches the game so it loads and plays fully offline
 // after one visit with internet.
-const CACHE = "slime-games-v25";
+const CACHE = "slime-games-v26";
 const ASSETS = ["./", "index.html", "game.js", "peerjs.min.js", "manifest.json", "icon.svg", "apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
