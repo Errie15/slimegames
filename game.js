@@ -208,13 +208,14 @@ function orientationHandler(e) {
   const rightG = tilt.holdA === 90 ? -gy : gy;
   tilt.t = (Math.asin(Math.max(-1, Math.min(1, rightG))) * 180) / Math.PI;
 
-  // analog steering: small dead zone, then speed scales with tilt up to FULL
+  // analog steering: speed scales with tilt up to FULL degrees. The dead
+  // zone sits just above sensor noise so crossing the center is seamless.
   const FULL = gyroFullAngle();
-  const DEAD = 1.2;
+  const DEAD = 0.4;
   const d = tilt.t - tilt.cal;
   // re-center only when truly neutral, and very slowly — must never eat a
   // small intentional tilt
-  if (Math.abs(d) < 0.8) tilt.cal += (tilt.t - tilt.cal) * 0.002;
+  if (Math.abs(d) < 0.3) tilt.cal += (tilt.t - tilt.cal) * 0.001;
   let mag = Math.min(1, Math.max(0, (Math.abs(d) - DEAD) / (FULL - DEAD)));
   if (gyroCurve === "dynamic") mag = Math.pow(mag, 1.8); // fine control near center
   tilt.ax = Math.sign(d) * mag;
