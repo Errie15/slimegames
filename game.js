@@ -59,6 +59,7 @@ const NET = {
   rtt: 0,                // smoothed round-trip time, ms
   route: null,           // "DIRECT" | "RELAY" once known
   ballR: null,           // guest side: smoothed rendered ball position
+  oppR: {},              // guest side: smoothed rendered opponent positions
   pingT: 0,
   lan: false,            // true when the local relay server is reachable
   connected: false,
@@ -628,6 +629,7 @@ function startGame(mode) {
   NET.lastAt = 0;
   NET.gapEma = 40;
   NET.ballR = null;
+  NET.oppR = {};
   NET.pingT = 0;
   NET.myIdx = mode === "guest" ? roster.findIndex((e) => e.gid === NET.myGid) : -1;
   resetRally(0);
@@ -1438,25 +1440,31 @@ function view() {
     const span = s1.at - s0.at;
     const f = span > 0 ? Math.min(1, Math.max(0, (target - s0.at) / span)) : 1;
     const L = (a, b) => a + (b - a) * f;
-    // buffer ran dry (packet burst gap): extrapolate with last known velocity
-    // instead of freezing until the next burst arrives
-    const dryF = target > newest.at
-      ? Math.min(5, (target - newest.at) / (1000 / 60)) : 0;
+    // Opponents: project forward from the newest snapshot toward "now" using
+    // their velocities — cancels a chunk of one-way latency on slow routes.
+    // Frozen rounds render exact server positions (stale velocities lie).
+    const still = newest.fz > 0 || newest.cd > 0;
+    const oneWayF = Math.min(4, ((NET.rtt || 0) / 2) / (1000 / 60));
+    const aheadF = still ? 0
+      : Math.min(7, (performance.now() - newest.at) / (1000 / 60) + oneWayF);
     return {
       slimes: newest.p.map((pp, i) => {
         if (i === NET.myIdx && slimes[i]) {
           return { x: slimes[i].x, y: slimes[i].y, side: slimes[i].side, color: slimes[i].color };
         }
         let x, y;
-        if (dryF > 0 && pp.length >= 4) {
-          x = pp[0] + pp[2] * dryF;
-          y = pp[1] + pp[3] * dryF + 0.5 * GRAVITY * dryF * dryF;
+        if (aheadF > 0 && pp.length >= 4) {
+          x = pp[0] + pp[2] * aheadF;
+          y = Math.min(FLOOR_Y, pp[1] + pp[3] * aheadF + 0.5 * GRAVITY * aheadF * aheadF);
           x = Math.max(SLIME_R, Math.min(W - SLIME_R, x));
-          y = Math.min(FLOOR_Y, y);
         } else {
           x = s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : pp[0];
           y = s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : pp[1];
         }
+        // smooth out mispredictions on direction changes
+        const prev = NET.oppR[i];
+        if (prev && !still) { x = prev.x + (x - prev.x) * 0.45; y = prev.y + (y - prev.y) * 0.45; }
+        NET.oppR[i] = { x, y };
         return {
           x, y,
           side: roster[i] ? roster[i].team : 0,
@@ -1484,7 +1492,7 @@ function reckonBall(newest, s0, s1, L) {
   const nb = newest.b;
   if (nb.length >= 4 && newest.fz === 0) {
     const aheadMs = (performance.now() - newest.at) + (NET.rtt || 30) / 2;
-    const f = Math.min(8, aheadMs / (1000 / 60)); // frames ahead, capped
+    const f = Math.min(12, aheadMs / (1000 / 60)); // frames ahead, capped
     const g = cfg().ballGrav;
     const r = cfg().ballR;
     bx = nb[0] + nb[2] * f;
