@@ -99,34 +99,42 @@
   .pulse { animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 
-  /* touch controls */
+  /* touch controls — sized in % of the canvas so they stay inside the
+     ground strip at the bottom and never cover the court */
   #touchControls { position: absolute; inset: 0; pointer-events: none; display: none; }
   #touchControls.active { display: block; }
   .tbtn {
     position: absolute;
-    bottom: 14px;
-    width: 74px;
-    height: 74px;
+    bottom: 2.5%;
+    height: 15%;
+    aspect-ratio: 1;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.12);
     border: 2px solid rgba(255, 255, 255, 0.35);
-    color: rgba(255, 255, 255, 0.8);
-    font-size: 28px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: clamp(14px, 4.5vmin, 30px);
     display: flex;
     align-items: center;
     justify-content: center;
     pointer-events: auto;
     -webkit-tap-highlight-color: transparent;
   }
-  .tbtn.pressed { background: rgba(255, 225, 77, 0.35); }
-  #tLeft { left: 16px; }
-  #tRight { left: 104px; }
-  #tJump { right: 16px; }
+  .tbtn.pressed { background: rgba(255, 225, 77, 0.4); }
+  #tLeft { left: 2%; }
+  #tRight { left: 14%; }
+  #tJump { right: 2%; }
+
+  /* portrait phones: render the whole app (menus and game) rotated 90° so it
+     is always landscape — works even with the phone's rotation lock on */
+  @media (orientation: portrait) and (pointer: coarse) {
+    #wrap { transform: rotate(90deg); }
+    canvas { max-width: 94vh; max-height: 96vw; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <canvas id="game" width="1000" height="560"></canvas>
+  <canvas id="game" width="1000" height="640"></canvas>
 
   <!-- main menu: pick a game -->
   <div class="overlay" id="menu">

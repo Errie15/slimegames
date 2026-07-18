@@ -3,7 +3,7 @@
 // ================= constants =================
 // Game units; y grows downward, floor at FLOOR_Y.
 const W = 1000;
-const H = 560;
+const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
@@ -118,7 +118,12 @@ function orientationHandler(e) {
   tilt.seen = true;
   // map the physical left/right tilt to whichever sensor axis matches
   // the current screen rotation
-  const angle = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
+  let angle = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
+  // portrait screen but the app is CSS-rotated to landscape: the user is
+  // holding the phone sideways, so treat it as a 90° rotation
+  if ((angle === 0 || angle === 180) && matchMedia("(orientation: portrait) and (pointer: coarse)").matches) {
+    angle = 90;
+  }
   let t;
   if (angle === 90) t = e.beta;
   else if (angle === 270 || angle === -90) t = -e.beta;
@@ -360,7 +365,17 @@ function hideAllScreens() {
   for (const s of screens) $(s).classList.add("hidden");
 }
 
+async function goLandscape() {
+  // Android: real fullscreen + orientation lock. iPhone: not allowed, but the
+  // CSS forced-rotation handles it there.
+  try {
+    await document.documentElement.requestFullscreen?.();
+    await screen.orientation.lock?.("landscape");
+  } catch {}
+}
+
 function startGame(mode) {
+  if (IS_TOUCH) goLandscape();
   G.mode = mode;
   G.score = [0, 0];
   G.server = 0;
