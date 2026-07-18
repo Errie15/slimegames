@@ -940,7 +940,11 @@ function handleNetMessage(msg) {
       NET.lastSeq = msg.q || NET.lastSeq;
       NET.lastState = msg;
       const now = performance.now();
-      if (NET.lastAt) NET.gapEma = NET.gapEma * 0.9 + Math.min(200, now - NET.lastAt) * 0.1;
+      if (NET.lastAt) {
+        const gap = Math.min(200, now - NET.lastAt);
+        NET.gapEma = NET.gapEma * 0.9 + gap * 0.1;
+        NET.jitEma = (NET.jitEma || 0) * 0.9 + Math.abs(gap - NET.gapEma) * 0.1;
+      }
       NET.lastAt = now;
       NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz, aw: msg.aw, rd: msg.rd, tot: msg.tot });
       if (NET.snaps.length > 30) NET.snaps.shift();
@@ -1304,6 +1308,10 @@ function update() {
       if (NET.fast && NET.fast.open) NET.fast.send(p); else netSend(p);
     }
     if (NET.pingT % 180 === 0 && !NET.lan) pollRoute();
+    // fast lane died? try to reopen it — TCP fallback is what causes lag spikes
+    if (NET.pingT % 300 === 0 && !NET.lan && NET.peer && !NET.fast && NET.myGid != null && NET.joinCode) {
+      openFastChannel(NET.myGid);
+    }
     return;
   }
 
@@ -1426,7 +1434,7 @@ function sendSnapshot() {
   const obj = {
     t: "state",
     q: ++stateSeq,
-    p: slimes.map((s) => [rnd(s.x), rnd(s.y)]),
+    p: slimes.map((s) => [rnd(s.x), rnd(s.y), rnd(s.vx), rnd(s.vy)]),
     b: [rnd(ball.x), rnd(ball.y), rnd(ball.vx), rnd(ball.vy)],
     sc: G.score,
     fl: G.flash,
@@ -1455,7 +1463,8 @@ function view() {
     // delay adapts to the actual snapshot rate. Own slime: local prediction.
     const S = NET.snaps;
     const newest = S[S.length - 1];
-    const delay = Math.min(120, Math.max(35, NET.gapEma * 2 + 8));
+    // buffer sized by both rate AND jitter — bursty WiFi gets more slack
+    const delay = Math.min(150, Math.max(30, NET.gapEma + 2 * (NET.jitEma || 0) + 8));
     const target = performance.now() - delay;
     let s0 = S[0], s1 = newest;
     for (let i = S.length - 1; i >= 0; i--) {
@@ -1464,14 +1473,27 @@ function view() {
     const span = s1.at - s0.at;
     const f = span > 0 ? Math.min(1, Math.max(0, (target - s0.at) / span)) : 1;
     const L = (a, b) => a + (b - a) * f;
+    // buffer ran dry (packet burst gap): extrapolate with last known velocity
+    // instead of freezing until the next burst arrives
+    const dryF = target > newest.at
+      ? Math.min(5, (target - newest.at) / (1000 / 60)) : 0;
     return {
-      slimes: newest.p.map((_, i) => {
+      slimes: newest.p.map((pp, i) => {
         if (i === NET.myIdx && slimes[i]) {
           return { x: slimes[i].x, y: slimes[i].y, side: slimes[i].side, color: slimes[i].color };
         }
+        let x, y;
+        if (dryF > 0 && pp.length >= 4) {
+          x = pp[0] + pp[2] * dryF;
+          y = pp[1] + pp[3] * dryF + 0.5 * GRAVITY * dryF * dryF;
+          x = Math.max(SLIME_R, Math.min(W - SLIME_R, x));
+          y = Math.min(FLOOR_Y, y);
+        } else {
+          x = s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : pp[0];
+          y = s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : pp[1];
+        }
         return {
-          x: s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : newest.p[i][0],
-          y: s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : newest.p[i][1],
+          x, y,
           side: roster[i] ? roster[i].team : 0,
           color: roster[i] ? roster[i].color : "#fff",
         };
@@ -1636,7 +1658,9 @@ function draw() {
   if ((G.mode === "host" || G.mode === "guest") && G.running && NET.rtt) {
     ctx.fillStyle = "rgba(255,255,255,0.45)";
     ctx.font = "12px 'Courier New', monospace";
-    ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}`, 12, H - 10);
+    const lane = G.mode === "guest" && !NET.lan && !(NET.fast && NET.fast.open) ? " · TCP" : "";
+    const jit = NET.jitEma > 12 ? ` · JITTER ${Math.round(NET.jitEma)}` : "";
+    ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}${lane}${jit}`, 12, H - 10);
   }
 
   if (v.flash !== null && v.flash !== undefined && (v.freeze > 0 || v.await)) {
