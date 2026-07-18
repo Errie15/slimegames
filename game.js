@@ -38,14 +38,20 @@ const G = {
 const NET = {
   ws: null,              // LAN transport (node server.js relay)
   peer: null,            // online transport (WebRTC via PeerJS)
-  conn: null,
+  conn: null,            // guest side: the single channel to the host
+  guests: new Map(),     // host side, online mode: gid -> DataConnection
+  inputs: new Map(),     // host side: gid -> latest input
   lan: false,            // true when the local relay server is reachable
   connected: false,
   role: null,
-  remoteInput: { l: false, r: false, j: false },
   lastState: null,       // latest snapshot (guest side)
   info: null,            // {ips, port} from /info
 };
+
+// pre-game lobby, host side: gid -> { team: null|0|1 }
+const LOBBY = { players: new Map(), hostTeam: 0 };
+let myTeam = 0;          // this client's team in a network match
+let chosenTeam = null;   // guest's pick on the team screen
 
 // LAN relay available? (fails on GitHub Pages / Firebase / file:// -> online mode)
 fetch("/info")
@@ -53,29 +59,53 @@ fetch("/info")
   .then((info) => { NET.lan = true; NET.info = info; })
   .catch(() => { NET.lan = false; });
 
-function makeSlime(side) {
-  return {
-    side,
-    x: side === 0 ? W * 0.25 : W * 0.75,
-    y: FLOOR_Y,
-    vx: 0, vy: 0,
-    color: side === 0 ? "#e8413c" : "#3c6fe8",
-  };
+// Teams: 0 = red (left), 1 = blue (right). Teammates get different shades.
+const TEAM_COLORS = [["#e8413c", "#ff8b6b"], ["#3c6fe8", "#6fd0ff"]];
+const teamName = (t) => ["RED", "BLUE"][t];
+
+// roster: one entry per slime — { team, color, gid } where gid is null for
+// the local/host player and a guest id for remote players
+function defaultRoster() {
+  return [
+    { team: 0, color: TEAM_COLORS[0][0], gid: null },
+    { team: 1, color: TEAM_COLORS[1][0], gid: null },
+  ];
 }
-const slimes = [makeSlime(0), makeSlime(1)];
+let roster = defaultRoster();
+
+const slimes = [];
+function buildSlimes() {
+  slimes.length = 0;
+  for (const e of roster) {
+    slimes.push({
+      side: e.team, x: 0, y: FLOOR_Y, vx: 0, vy: 0,
+      color: e.color, gid: e.gid ?? null, speedMul: 1,
+    });
+  }
+}
+buildSlimes();
+
 const ball = { x: 0, y: 0, vx: 0, vy: 0 };
 
 function cfg() { return CFG[G.type]; }
 
 function resetRally(servingSide) {
-  const startX = G.type === "volley" ? [W * 0.25, W * 0.75] : [W * 0.2, W * 0.8];
-  for (let i = 0; i < 2; i++) {
-    slimes[i].x = startX[i];
-    slimes[i].y = FLOOR_Y;
-    slimes[i].vx = 0; slimes[i].vy = 0;
+  const byTeam = [[], []];
+  for (const s of slimes) byTeam[s.side].push(s);
+  for (const t of [0, 1]) {
+    const solo = byTeam[t].length < 2;
+    const spots = G.type === "volley"
+      ? (solo ? [0.25] : [0.15, 0.34])
+      : (solo ? [0.2] : [0.12, 0.3]);
+    byTeam[t].forEach((s, i) => {
+      const f = spots[i] ?? 0.42;
+      s.x = W * (t === 0 ? f : 1 - f);
+      s.y = FLOOR_Y; s.vx = 0; s.vy = 0;
+    });
   }
   if (G.type === "volley") {
-    ball.x = servingSide === 0 ? W * 0.25 : W * 0.75;
+    const server = byTeam[servingSide][0] || slimes[0];
+    ball.x = server.x;
     ball.y = FLOOR_Y - 220;
   } else {
     ball.x = W / 2;
@@ -293,7 +323,10 @@ function stepSlime(s, input) {
   s.x += s.vx;
   s.y += s.vy;
   if (s.y > FLOOR_Y) { s.y = FLOOR_Y; s.vy = 0; }
+  clampSlimeX(s);
+}
 
+function clampSlimeX(s) {
   let minX, maxX;
   if (G.type === "volley") {
     minX = s.side === 0 ? SLIME_R : W / 2 + NET_HALF + SLIME_R;
@@ -304,18 +337,23 @@ function stepSlime(s, input) {
   s.x = Math.max(minX, Math.min(maxX, s.x));
 }
 
-function slimeVsSlime() {
-  const [a, b] = slimes;
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const d = Math.hypot(dx, dy);
-  if (d > 0.001 && d < SLIME_R * 2) {
-    const push = (SLIME_R * 2 - d) / 2;
-    const ux = dx / d, uy = dy / d;
-    a.x -= ux * push; b.x += ux * push;
-    if (uy < -0.3) a.y = Math.min(FLOOR_Y, a.y + push);  // a landed on b
-    if (uy > 0.3) b.y = Math.min(FLOOR_Y, b.y + push);   // b landed on a
-    a.x = Math.max(SLIME_R, Math.min(W - SLIME_R, a.x));
-    b.x = Math.max(SLIME_R, Math.min(W - SLIME_R, b.x));
+// every pair of slimes pushes apart (teammates share a half in volleyball,
+// everyone shares the pitch in soccer)
+function slimeCollisions() {
+  for (let i = 0; i < slimes.length; i++) {
+    for (let j = i + 1; j < slimes.length; j++) {
+      const a = slimes[i], b = slimes[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 0.001 && d < SLIME_R * 2) {
+        const push = (SLIME_R * 2 - d) / 2;
+        const ux = dx / d, uy = dy / d;
+        a.x -= ux * push; b.x += ux * push;
+        if (uy < -0.3) a.y = Math.min(FLOOR_Y, a.y + push);  // a landed on b
+        if (uy > 0.3) b.y = Math.min(FLOOR_Y, b.y + push);   // b landed on a
+        clampSlimeX(a); clampSlimeX(b);
+      }
+    }
   }
 }
 
@@ -414,7 +452,7 @@ function stepBall() {
 
 // ================= game flow =================
 const $ = (id) => document.getElementById(id);
-const screens = ["menu", "modeMenu", "hostScreen", "joinScreen", "winScreen", "pauseScreen", "dcScreen"];
+const screens = ["menu", "modeMenu", "hostScreen", "joinScreen", "teamScreen", "winScreen", "pauseScreen", "dcScreen"];
 function showScreen(id) {
   for (const s of screens) $(s).classList.toggle("hidden", s !== id);
 }
@@ -435,8 +473,9 @@ function startGame(mode) {
   if (IS_TOUCH) goLandscape();
   tilt.cal = tilt.t; // however the phone is held right now = neutral
   G.mode = mode;
-  slimes[0].speedMul = 1;
-  slimes[1].speedMul = mode === "1p" ? DIFF[aiLevel].speed : 1;
+  if (mode === "1p" || mode === "2p") roster = defaultRoster();
+  buildSlimes();
+  if (mode === "1p") slimes[1].speedMul = DIFF[aiLevel].speed;
   G.score = [0, 0];
   G.server = 0;
   G.running = true;
@@ -461,9 +500,15 @@ function playerNames() {
 function endGame(winner) {
   G.running = false;
   $("btnPause").classList.add("hidden");
-  const n = playerNames();
-  $("winText").textContent = n[winner] === "YOU" ? "YOU WIN! \u{1F3C6}"
-    : n[winner] + (n[winner].endsWith("S") ? " WIN!" : " WINS!");
+  if (G.mode === "host" || G.mode === "guest") {
+    $("winText").textContent = winner === myTeam
+      ? (roster.length > 2 ? "YOUR TEAM WINS! \u{1F3C6}" : "YOU WIN! \u{1F3C6}")
+      : `${teamName(winner)} TEAM WINS!`;
+  } else {
+    const n = playerNames();
+    $("winText").textContent = n[winner] === "YOU" ? "YOU WIN! \u{1F3C6}"
+      : n[winner] + (n[winner].endsWith("S") ? " WIN!" : " WINS!");
+  }
   const isGuest = G.mode === "guest";
   $("btnRematch").classList.toggle("hidden", isGuest);
   $("guestWait").classList.toggle("hidden", !isGuest);
@@ -475,7 +520,7 @@ function togglePause() {
   if (G.mode === "guest") { netSend({ t: "pauseReq" }); return; } // host decides
   G.paused = !G.paused;
   $("pauseScreen").classList.toggle("hidden", !G.paused);
-  if (G.mode === "host") netSend({ t: "pause", on: G.paused });
+  if (G.mode === "host") netSendAll({ t: "pause", on: G.paused });
 }
 
 function backToMenu() {
@@ -489,9 +534,124 @@ function backToMenu() {
 }
 
 // ================= networking (client side) =================
+// guest -> host (and host -> LAN server for control messages)
 function netSend(obj) {
   if (NET.ws && NET.ws.readyState === 1) NET.ws.send(JSON.stringify(obj));
   else if (NET.conn && NET.conn.open) NET.conn.send(obj);
+}
+
+// host -> all guests
+function netSendAll(obj) {
+  if (NET.lan) {
+    if (NET.ws && NET.ws.readyState === 1) NET.ws.send(JSON.stringify(obj));
+  } else {
+    for (const conn of NET.guests.values()) if (conn.open) conn.send(obj);
+  }
+}
+
+// host -> one guest
+function netSendTo(gid, obj) {
+  if (NET.lan) {
+    if (NET.ws && NET.ws.readyState === 1) NET.ws.send(JSON.stringify({ ...obj, to: gid }));
+  } else {
+    const conn = NET.guests.get(gid);
+    if (conn && conn.open) conn.send(obj);
+  }
+}
+
+// ---- lobby (host side) ----
+function initLobby() {
+  LOBBY.players.clear();
+  LOBBY.hostTeam = 0;
+  NET.inputs.clear();
+  syncHostTeamUI();
+  renderLobby();
+}
+
+function teamCount(t) {
+  let n = LOBBY.hostTeam === t ? 1 : 0;
+  for (const p of LOBBY.players.values()) if (p.team === t) n++;
+  return n;
+}
+
+function broadcastLobby() {
+  netSendAll({
+    t: "lobby",
+    host: LOBBY.hostTeam,
+    players: [...LOBBY.players].map(([gid, p]) => ({ gid, team: p.team })),
+  });
+}
+
+function renderLobby() {
+  const rows = [`YOU — ${teamName(LOBBY.hostTeam)}`];
+  let n = 2;
+  for (const p of LOBBY.players.values()) {
+    rows.push(`PLAYER ${n++} — ${p.team === null ? "choosing…" : teamName(p.team)}`);
+  }
+  $("lobbyList").innerHTML = rows.join("<br>");
+  const ready = LOBBY.players.size >= 1
+    && [...LOBBY.players.values()].every((p) => p.team !== null)
+    && teamCount(0) >= 1 && teamCount(1) >= 1
+    && teamCount(0) <= 2 && teamCount(1) <= 2;
+  $("btnStart").disabled = !ready;
+}
+
+function syncHostTeamUI() {
+  $("hostRed").classList.toggle("sel", LOBBY.hostTeam === 0);
+  $("hostBlue").classList.toggle("sel", LOBBY.hostTeam === 1);
+}
+
+function hostGuestIn(gid) {
+  LOBBY.players.set(gid, { team: null });
+  broadcastLobby();
+  renderLobby();
+}
+
+function hostGuestOut(gid) {
+  LOBBY.players.delete(gid);
+  NET.guests.delete(gid);
+  NET.inputs.delete(gid);
+  const inMatch = G.running || !$("winScreen").classList.contains("hidden");
+  if (inMatch && LOBBY.players.size === 0) {
+    handleNetMessage({ t: "peer-left" });
+    return;
+  }
+  broadcastLobby();
+  renderLobby();
+}
+
+// messages from one guest, host side
+function hostMsg(gid, msg) {
+  switch (msg.t) {
+    case "team": {
+      const p = LOBBY.players.get(gid);
+      if (!p) break;
+      const t = msg.team === 1 ? 1 : 0;
+      if (p.team === t || teamCount(t) < 2) p.team = t;
+      broadcastLobby();
+      renderLobby();
+      break;
+    }
+    case "input":
+      NET.inputs.set(gid, { left: !!msg.l, right: !!msg.r, jump: !!msg.j });
+      break;
+    case "pauseReq":
+      togglePause();
+      break;
+  }
+}
+
+function hostStart() {
+  const idx = [0, 0];
+  roster = [];
+  const add = (team, gid) => roster.push({ team, color: TEAM_COLORS[team][idx[team]++ % 2], gid });
+  add(LOBBY.hostTeam, null);
+  for (const [gid, p] of LOBBY.players) add(p.team, gid);
+  myTeam = LOBBY.hostTeam;
+  for (const gid of LOBBY.players.keys()) {
+    netSendTo(gid, { t: "start", game: G.type, roster, you: gid });
+  }
+  startGame("host");
 }
 
 function connect(onOpen) {
@@ -516,51 +676,76 @@ function connect(onOpen) {
 }
 
 function handleNetMessage(msg) {
-  switch (msg.t) {
-    case "created":
+  // host side: lobby management and per-guest routing (LAN server tags guest
+  // messages with .gid; the PeerJS path calls hostMsg directly)
+  if (NET.role === "host") {
+    if (msg.t === "created") {
+      initLobby();
       $("roomCode").textContent = msg.code;
       showScreen("hostScreen");
       fetch("/info").then((r) => r.json()).then((info) => {
         NET.info = info;
         const ip = info.ips[0];
         if (!ip) {
-          $("hostUrl").textContent = "other player opens this same address and joins with the code";
+          $("hostUrl").textContent = "other players open this same address and join with the code";
           return;
         }
-        let html = `other player opens:<br><b>http://${ip}:${info.port}</b>`;
+        let html = `other players open:<br><b>http://${ip}:${info.port}</b>`;
         if (info.httpsPort) {
           html += `<br>(or <b>https://${ip}:${info.httpsPort}</b> for tilt controls)`;
         }
         $("hostUrl").innerHTML = html + "<br>then JOIN GAME with this code";
       }).catch(() => {});
-      break;
+    } else if (msg.t === "guest-in") {
+      hostGuestIn(msg.gid);
+    } else if (msg.t === "guest-out") {
+      hostGuestOut(msg.gid);
+    } else if (msg.gid !== undefined) {
+      hostMsg(msg.gid, msg);
+    }
+    return;
+  }
+
+  // guest side
+  switch (msg.t) {
     case "joined":
-      if (msg.game) G.type = msg.game;                 // guest learns the game type
-      startGame(NET.role === "host" ? "host" : "guest");
+      if (msg.game) G.type = msg.game;
+      NET.myGid = msg.gid ?? null;
+      chosenTeam = null;
+      updateTeamUI(null);
+      showScreen("teamScreen");
+      break;
+    case "lobby": {
+      // sync own choice with what the host accepted
+      NET.lastLobby = msg;
+      if (NET.myGid != null) {
+        const me = msg.players.find((p) => p.gid === NET.myGid);
+        if (me) chosenTeam = me.team;
+      }
+      updateTeamUI(msg);
+      break;
+    }
+    case "start":
+      G.type = msg.game;
+      roster = msg.roster;
+      myTeam = (roster.find((e) => e.gid === msg.you) || roster[0]).team;
+      startGame("guest");
       break;
     case "error":
       $("joinStatus").textContent = msg.reason || "Something went wrong.";
-      break;
-    case "input":
-      NET.remoteInput = { l: msg.l, r: msg.r, j: msg.j };
       break;
     case "state":
       NET.lastState = msg;
       break;
     case "end":
-      if (G.mode === "guest") endGame(msg.w);
+      endGame(msg.w);
       break;
     case "restart":
-      if (G.mode === "guest") startGame("guest");
+      startGame("guest");
       break;
     case "pause":
-      if (G.mode === "guest") {
-        G.paused = msg.on;
-        $("pauseScreen").classList.toggle("hidden", !msg.on);
-      }
-      break;
-    case "pauseReq":
-      if (G.mode === "host") togglePause();
+      G.paused = msg.on;
+      $("pauseScreen").classList.toggle("hidden", !msg.on);
       break;
     case "peer-left":
       G.running = false;
@@ -570,6 +755,24 @@ function handleNetMessage(msg) {
       showScreen("dcScreen");
       break;
   }
+}
+
+// guest team-select screen: reflect lobby counts and own choice
+function updateTeamUI(lobbyMsg) {
+  const counts = [0, 0];
+  if (lobbyMsg) {
+    counts[lobbyMsg.host]++;
+    for (const p of lobbyMsg.players) if (p.team !== null) counts[p.team]++;
+  }
+  $("teamRed").classList.toggle("sel", chosenTeam === 0);
+  $("teamBlue").classList.toggle("sel", chosenTeam === 1);
+  $("teamRed").disabled = chosenTeam !== 0 && counts[0] >= 2;
+  $("teamBlue").disabled = chosenTeam !== 1 && counts[1] >= 2;
+  $("teamRed").textContent = `RED ${counts[0]}/2`;
+  $("teamBlue").textContent = `BLUE ${counts[1]}/2`;
+  $("teamStatus").textContent = chosenTeam === null
+    ? "pick a side!"
+    : "waiting for the host to start…";
 }
 
 // ---- online transport: WebRTC peer-to-peer, PeerJS cloud for the handshake ----
@@ -602,6 +805,9 @@ function randomCode() {
 }
 
 function cleanupPeer() {
+  for (const conn of NET.guests.values()) { try { conn.close(); } catch {} }
+  NET.guests = new Map();
+  NET.inputs = new Map();
   if (NET.conn) { try { NET.conn.close(); } catch {} NET.conn = null; }
   if (NET.peer) { try { NET.peer.destroy(); } catch {} NET.peer = null; }
 }
@@ -616,6 +822,8 @@ function peerHost(attempt = 0) {
   if (typeof Peer === "undefined") { $("netError").textContent = "peerjs.min.js is missing."; return; }
   cleanupPeer();
   NET.role = "host";
+  initLobby();
+  let nextGid = 1;
   const code = randomCode();
   const peer = new Peer(PEER_PREFIX + code, PEER_OPTS);
   NET.peer = peer;
@@ -627,16 +835,26 @@ function peerHost(attempt = 0) {
     $("roomCode").textContent = code;
     const here = location.origin === "null" ? "this page" : location.origin + location.pathname;
     $("hostUrl").innerHTML =
-      `other player opens<br><b>${here}</b><br>(anywhere with internet) and joins with this code`;
+      `other players open<br><b>${here}</b><br>(anywhere with internet) and join with this code`;
   });
   peer.on("connection", (conn) => {
-    if (NET.conn) { conn.close(); return; } // room already full
-    NET.conn = conn;
-    wireConn(conn);
+    if (NET.peer !== peer) return;
+    if (NET.guests.size >= 3 || G.running) { // room full / match in progress
+      conn.on("open", () => conn.close());
+      return;
+    }
+    const gid = nextGid++;
     conn.on("open", () => {
-      conn.send({ t: "joined", game: G.type });
-      handleNetMessage({ t: "joined" });
+      NET.guests.set(gid, conn);
+      conn.send({ t: "joined", game: G.type, gid });
+      hostGuestIn(gid);
     });
+    conn.on("data", (d) => {
+      if (d && typeof d === "object" && NET.guests.get(gid) === conn) hostMsg(gid, d);
+    });
+    const gone = () => { if (NET.guests.get(gid) === conn) hostGuestOut(gid); };
+    conn.on("close", gone);
+    conn.on("error", gone);
   });
   peer.on("error", (err) => {
     if (NET.peer !== peer) return;
@@ -766,9 +984,19 @@ $("btnBackJoin").onclick = () => { if (NET.ws) { NET.ws.close(); NET.ws = null; 
 $("btnDoJoin").onclick = doJoin;
 $("codeInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doJoin(); });
 $("btnRematch").onclick = () => {
-  if (G.mode === "host") netSend({ t: "restart" });
+  if (G.mode === "host") netSendAll({ t: "restart" });
   startGame(G.mode);
 };
+$("btnStart").onclick = hostStart;
+$("hostRed").onclick = () => {
+  if (teamCount(0) - (LOBBY.hostTeam === 0 ? 1 : 0) < 2) { LOBBY.hostTeam = 0; syncHostTeamUI(); broadcastLobby(); renderLobby(); }
+};
+$("hostBlue").onclick = () => {
+  if (teamCount(1) - (LOBBY.hostTeam === 1 ? 1 : 0) < 2) { LOBBY.hostTeam = 1; syncHostTeamUI(); broadcastLobby(); renderLobby(); }
+};
+$("teamRed").onclick = () => { chosenTeam = 0; netSend({ t: "team", team: 0 }); updateTeamUI(NET.lastLobby); };
+$("teamBlue").onclick = () => { chosenTeam = 1; netSend({ t: "team", team: 1 }); updateTeamUI(NET.lastLobby); };
+$("btnLeaveTeam").onclick = backToMenu;
 $("btnMenu").onclick = backToMenu;
 $("btnDcMenu").onclick = backToMenu;
 $("btnPause").onclick = togglePause;
@@ -789,7 +1017,7 @@ function update() {
       G.flash = null;
       const winner = G.score.findIndex((s) => s >= cfg().win);
       if (winner !== -1) {
-        if (G.mode === "host") { sendSnapshot(); netSend({ t: "end", w: winner }); }
+        if (G.mode === "host") { sendSnapshot(); netSendAll({ t: "end", w: winner }); }
         endGame(winner);
         return;
       }
@@ -803,17 +1031,22 @@ function update() {
   // during long rallies, periodically re-roll the AI's tendencies
   if (G.mode === "1p" && G.rallyT % 150 === 0) rollAI();
 
-  const p2input =
-    G.mode === "1p" ? (G.type === "volley" ? aiVolley() : aiSoccer())
-    : G.mode === "2p" ? arrowInput()
-    : { left: NET.remoteInput.l, right: NET.remoteInput.r, jump: NET.remoteInput.j };
-  const p1input = G.mode === "2p"
-    ? { left: wasdInput().left || touch.l, right: wasdInput().right || touch.r, jump: wasdInput().jump || touch.j }
-    : combinedInput();
-
-  stepSlime(slimes[0], p1input);
-  stepSlime(slimes[1], p2input);
-  if (G.type === "soccer") slimeVsSlime();
+  if (G.mode === "host") {
+    for (const s of slimes) {
+      const input = s.gid === null ? combinedInput() : (NET.inputs.get(s.gid) || IDLE);
+      stepSlime(s, input);
+    }
+  } else {
+    const p2input = G.mode === "1p"
+      ? (G.type === "volley" ? aiVolley() : aiSoccer())
+      : arrowInput();
+    const p1input = G.mode === "2p"
+      ? { left: wasdInput().left || touch.l, right: wasdInput().right || touch.r, jump: wasdInput().jump || touch.j }
+      : combinedInput();
+    stepSlime(slimes[0], p1input);
+    stepSlime(slimes[1], p2input);
+  }
+  slimeCollisions();
   stepBall();
 
   if (G.mode === "host") sendSnapshot();
@@ -821,7 +1054,7 @@ function update() {
 
 function sendSnapshot() {
   const rnd = (v) => Math.round(v * 10) / 10;
-  netSend({
+  netSendAll({
     t: "state",
     p: slimes.map((s) => [rnd(s.x), rnd(s.y)]),
     b: [rnd(ball.x), rnd(ball.y)],
@@ -836,7 +1069,11 @@ function view() {
   if (G.mode === "guest" && NET.lastState) {
     const st = NET.lastState;
     return {
-      slimes: st.p.map((p, i) => ({ x: p[0], y: p[1], side: i, color: slimes[i].color })),
+      slimes: st.p.map((p, i) => ({
+        x: p[0], y: p[1],
+        side: roster[i] ? roster[i].team : 0,
+        color: roster[i] ? roster[i].color : "#fff",
+      })),
       ball: { x: st.b[0], y: st.b[1] },
       score: st.sc,
       flash: st.fl,
@@ -961,12 +1198,13 @@ function draw() {
   drawScore(v);
 
   if (v.flash !== null && v.flash !== undefined && v.freeze > 0) {
-    const n = playerNames();
     ctx.fillStyle = "#ffe14d";
     ctx.font = "bold 28px 'Courier New', monospace";
     ctx.textAlign = "center";
     const word = G.type === "soccer" ? "GOAL" : "POINT";
-    ctx.fillText(`${word} — ${n[v.flash]}`, W / 2, 120);
+    const who = (G.mode === "host" || G.mode === "guest")
+      ? teamName(v.flash) : playerNames()[v.flash];
+    ctx.fillText(`${word} — ${who}`, W / 2, 120);
     ctx.textAlign = "left";
   }
 }

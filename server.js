@@ -161,8 +161,8 @@ function send(c, data, opcode = 1) {
   c.socket.write(Buffer.concat([header, payload]));
 }
 
-// ---------- rooms ----------
-const rooms = new Map(); // code -> { host, guest, game }
+// ---------- rooms (host + up to 3 guests for team play) ----------
+const rooms = new Map(); // code -> { host, guests: Map<gid, client>, game, nextGid }
 
 function newCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
@@ -178,25 +178,41 @@ function handleMessage(c, text) {
   if (msg.t === "create") {
     if (c.room) return;
     const code = newCode();
-    rooms.set(code, { host: c, guest: null, game: msg.game === "soccer" ? "soccer" : "volley" });
+    rooms.set(code, {
+      host: c,
+      guests: new Map(),
+      game: msg.game === "soccer" ? "soccer" : "volley",
+      nextGid: 1,
+    });
     c.room = code; c.role = "host";
     send(c, JSON.stringify({ t: "created", code }));
   } else if (msg.t === "join") {
     const code = String(msg.code || "").toUpperCase().trim();
     const room = rooms.get(code);
-    if (!room || room.guest) {
+    if (!room || room.guests.size >= 3) {
       send(c, JSON.stringify({ t: "error", reason: room ? "Room is full" : "Room not found" }));
       return;
     }
-    room.guest = c; c.room = code; c.role = "guest";
-    send(c, JSON.stringify({ t: "joined", game: room.game }));
-    send(room.host, JSON.stringify({ t: "joined" }));
+    const gid = room.nextGid++;
+    room.guests.set(gid, c);
+    c.room = code; c.role = "guest"; c.gid = gid;
+    send(c, JSON.stringify({ t: "joined", game: room.game, gid }));
+    send(room.host, JSON.stringify({ t: "guest-in", gid }));
   } else {
-    // gameplay traffic: relay verbatim to the other peer
+    // gameplay traffic
     const room = rooms.get(c.room);
     if (!room) return;
-    const peer = c.role === "host" ? room.guest : room.host;
-    if (peer && peer.alive) send(peer, text);
+    if (c.role === "guest") {
+      // guest -> host, tagged with the guest's id
+      if (room.host.alive) send(room.host, JSON.stringify({ ...msg, gid: c.gid }));
+    } else if (msg.to != null) {
+      // host -> one guest
+      const g = room.guests.get(msg.to);
+      if (g && g.alive) send(g, text);
+    } else {
+      // host -> all guests
+      for (const g of room.guests.values()) if (g.alive) send(g, text);
+    }
   }
 }
 
@@ -207,11 +223,15 @@ function closeClient(c) {
   if (c.room) {
     const room = rooms.get(c.room);
     if (room) {
-      const peer = c.role === "host" ? room.guest : room.host;
-      rooms.delete(c.room);
-      if (peer) {
-        peer.room = null;
-        if (peer.alive) send(peer, JSON.stringify({ t: "peer-left" }));
+      if (c.role === "host") {
+        for (const g of room.guests.values()) {
+          g.room = null;
+          if (g.alive) send(g, JSON.stringify({ t: "peer-left" }));
+        }
+        rooms.delete(c.room);
+      } else {
+        room.guests.delete(c.gid);
+        if (room.host.alive) send(room.host, JSON.stringify({ t: "guest-out", gid: c.gid }));
       }
     }
     c.room = null;

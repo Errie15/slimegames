@@ -78,6 +78,17 @@
   #diffRow { display: flex; align-items: center; gap: 10px; color: #8888aa; font-size: 13px; letter-spacing: 1px; }
   button.diff { padding: 7px 14px; font-size: 13px; }
   button.diff.sel { border-color: #ffe14d; background: #ffe14d; color: #14141f; }
+  #lobbyTeams { display: flex; align-items: center; gap: 10px; color: #8888aa; font-size: 13px; letter-spacing: 1px; }
+  .teamRow { display: flex; gap: 14px; }
+  .teamRow .teamBtn { min-width: 130px; }
+  button.teamBtn { min-width: 0; }
+  button.teamBtn.red { border-color: #e8413c; }
+  button.teamBtn.red:hover, button.teamBtn.red.sel { background: #e8413c; color: #fff; }
+  button.teamBtn.blue { border-color: #3c6fe8; }
+  button.teamBtn.blue:hover, button.teamBtn.blue.sel { background: #3c6fe8; color: #fff; }
+  button.teamBtn:disabled { opacity: 0.35; pointer-events: none; }
+  #btnStart:disabled { opacity: 0.35; pointer-events: none; }
+  #lobbyList { line-height: 1.9; }
   .controls { font-size: 13px; color: #aaaacc; line-height: 1.9; }
   .controls b { color: #fff; }
   .hint { color: #666688; font-size: 12px; max-width: 420px; line-height: 1.7; }
@@ -215,13 +226,30 @@
     <button class="small" id="btnBackMode">&larr; BACK</button>
   </div>
 
-  <!-- host: waiting room -->
+  <!-- host: lobby -->
   <div class="overlay hidden" id="hostScreen">
     <h2>ROOM CODE</h2>
     <div id="roomCode">----</div>
     <div id="hostUrl"></div>
-    <div class="hint pulse">waiting for another player to join&hellip;</div>
+    <div id="lobbyTeams">
+      <span>YOUR TEAM:</span>
+      <button class="small teamBtn red sel" id="hostRed">RED</button>
+      <button class="small teamBtn blue" id="hostBlue">BLUE</button>
+    </div>
+    <div id="lobbyList" class="controls">waiting for players&hellip;</div>
+    <button id="btnStart" disabled>START GAME</button>
     <button class="small" id="btnCancelHost">CANCEL</button>
+  </div>
+
+  <!-- guest: team select -->
+  <div class="overlay hidden" id="teamScreen">
+    <h2>CHOOSE YOUR TEAM</h2>
+    <div class="teamRow">
+      <button class="teamBtn red" id="teamRed">RED</button>
+      <button class="teamBtn blue" id="teamBlue">BLUE</button>
+    </div>
+    <div id="teamStatus" class="hint pulse">pick a side!</div>
+    <button class="small" id="btnLeaveTeam">LEAVE</button>
   </div>
 
   <!-- join screen -->
