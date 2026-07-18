@@ -7,7 +7,7 @@ const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
-const SLIME_SPEED = 15;
+const SLIME_SPEED = 12;
 const JUMP_VEL = -11.5;
 
 const NET_HALF = 5;            // volleyball net half-width
@@ -173,7 +173,7 @@ if (IS_TOUCH) {
 }
 
 // ---- tilt controls (gyro to move, tap anywhere to jump) ----
-const tilt = { ax: 0, tap: false, seen: false, listening: false, t: 0, cal: 0, holdA: 90 };
+const tilt = { ax: 0, tap: false, seen: false, listening: false, t: 0, cal: 0, holdA: 90, prevT: 0, prevAt: 0, rate: 0 };
 let controlScheme = localStorage.getItem("slimeControls") || "buttons";
 
 // gyro sensitivity 1..10: sets how many degrees of tilt give full speed
@@ -218,7 +218,19 @@ function orientationHandler(e) {
   if (Math.abs(d) < 0.3) tilt.cal += (tilt.t - tilt.cal) * 0.001;
   let mag = Math.min(1, Math.max(0, (Math.abs(d) - DEAD) / (FULL - DEAD)));
   if (gyroCurve === "dynamic") mag = Math.pow(mag, 1.8); // fine control near center
-  tilt.ax = Math.sign(d) * mag;
+
+  // flick boost: the tilt *rate* feeds in too, so a quick wrist flick turns
+  // the slime immediately — before the angle has even crossed neutral
+  const nowMs = e.timeStamp || performance.now();
+  if (tilt.prevAt) {
+    const dt = Math.min(100, Math.max(5, nowMs - tilt.prevAt));
+    const rawRate = ((tilt.t - tilt.prevT) / dt) * 1000; // degrees per second
+    tilt.rate = tilt.rate * 0.7 + rawRate * 0.3;
+  }
+  tilt.prevAt = nowMs;
+  tilt.prevT = tilt.t;
+
+  tilt.ax = Math.max(-1, Math.min(1, Math.sign(d) * mag + tilt.rate / 220));
 }
 
 function enableTilt() {
