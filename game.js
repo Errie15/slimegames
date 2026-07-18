@@ -110,27 +110,35 @@ if (IS_TOUCH) {
 }
 
 // ---- tilt controls (gyro to move, tap anywhere to jump) ----
-const tilt = { dir: 0, tap: false, seen: false };
+const tilt = { dir: 0, tap: false, seen: false, t: 0, cal: 0, holdA: 90 };
 let controlScheme = localStorage.getItem("slimeControls") || "buttons";
 
 function orientationHandler(e) {
   if (e.gamma === null && e.beta === null) return;
   tilt.seen = true;
-  // map the physical left/right tilt to whichever sensor axis matches
-  // the current screen rotation
-  let angle = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
-  // portrait screen but the app is CSS-rotated to landscape: the user is
-  // holding the phone sideways, so treat it as a 90° rotation
-  if ((angle === 0 || angle === 180) && matchMedia("(orientation: portrait) and (pointer: coarse)").matches) {
-    angle = 90;
-  }
-  let t;
-  if (angle === 90) t = e.beta;
-  else if (angle === 270 || angle === -90) t = -e.beta;
-  else if (angle === 180) t = -e.gamma;
-  else t = e.gamma;
-  const DEAD = 8; // degrees of tilt before the slime moves
-  tilt.dir = t > DEAD ? 1 : t < -DEAD ? -1 : 0;
+
+  // Reconstruct the gravity direction in device coordinates from beta/gamma.
+  // This is immune to euler-angle flips near vertical holds and needs no
+  // screen-orientation APIs at all.
+  const b = ((e.beta || 0) * Math.PI) / 180;
+  const g = ((e.gamma || 0) * Math.PI) / 180;
+  const gx = Math.sin(g) * Math.cos(b); // gravity along the device's short axis
+  const gy = -Math.sin(b);              // gravity along the device's long axis
+
+  // The game is always shown landscape, so the phone is held sideways.
+  // Gravity along the short axis tells us which way: device-top to the
+  // user's left (gx < 0) or right (gx > 0). Hysteresis keeps the last
+  // answer when the phone is held too flat to tell.
+  if (gx < -0.2) tilt.holdA = 90;
+  else if (gx > 0.2) tilt.holdA = 270;
+
+  // Tilt = gravity along whatever direction is currently "screen right".
+  const rightG = tilt.holdA === 90 ? -gy : gy;
+  tilt.t = (Math.asin(Math.max(-1, Math.min(1, rightG))) * 180) / Math.PI;
+
+  const DEAD = 8; // degrees of tilt (from the calibrated neutral) before moving
+  const d = tilt.t - tilt.cal;
+  tilt.dir = d > DEAD ? 1 : d < -DEAD ? -1 : 0;
 }
 
 function enableTilt() {
@@ -376,6 +384,7 @@ async function goLandscape() {
 
 function startGame(mode) {
   if (IS_TOUCH) goLandscape();
+  tilt.cal = tilt.t; // however the phone is held right now = neutral
   G.mode = mode;
   G.score = [0, 0];
   G.server = 0;
