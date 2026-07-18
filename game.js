@@ -32,6 +32,7 @@ const G = {
   server: 0,             // side that serves / kicks off next
   freeze: 0,             // frames of freeze after a point
   flash: null,           // side that just scored
+  rallyT: 0,             // frames since the current rally started
 };
 
 const NET = {
@@ -82,6 +83,8 @@ function resetRally(servingSide) {
   }
   ball.vx = 0;
   ball.vy = 0;
+  G.rallyT = 0;
+  rollAI();
 }
 
 // ================= input =================
@@ -95,18 +98,38 @@ addEventListener("keyup", (e) => { keys[e.code] = false; });
 
 const touch = { l: false, r: false, j: false };
 const IS_TOUCH = "ontouchstart" in window;
-function bindTouch(id, flag) {
-  const el = document.getElementById(id);
-  const on = (e) => { e.preventDefault(); touch[flag] = true; el.classList.add("pressed"); };
-  const off = (e) => { e.preventDefault(); touch[flag] = false; el.classList.remove("pressed"); };
-  el.addEventListener("touchstart", on, { passive: false });
-  el.addEventListener("touchend", off, { passive: false });
-  el.addEventListener("touchcancel", off, { passive: false });
-}
+
+// Multi-touch button handling: on every touch event, recompute every button's
+// state from the full list of active touches. No per-button listeners means
+// no stuck or missed presses when several fingers act at once, and thumbs can
+// slide between left/right without lifting. A small pad grows the hit area
+// beyond the (already larger than visible) button element.
 if (IS_TOUCH) {
-  bindTouch("tLeft", "l");
-  bindTouch("tRight", "r");
-  bindTouch("tJump", "j");
+  const tbtns = {
+    l: document.getElementById("tLeft"),
+    r: document.getElementById("tRight"),
+    j: document.getElementById("tJump"),
+  };
+  const PAD = 14;
+  const updateTouches = (e) => {
+    e.preventDefault();
+    const state = { l: false, r: false, j: false };
+    for (const t of e.touches) {
+      for (const k of ["l", "r", "j"]) {
+        const r = tbtns[k].getBoundingClientRect();
+        if (t.clientX >= r.left - PAD && t.clientX <= r.right + PAD &&
+            t.clientY >= r.top - PAD && t.clientY <= r.bottom + PAD) state[k] = true;
+      }
+    }
+    for (const k of ["l", "r", "j"]) {
+      touch[k] = state[k];
+      tbtns[k].classList.toggle("pressed", state[k]);
+    }
+  };
+  const layer = document.getElementById("touchControls");
+  for (const ev of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
+    layer.addEventListener(ev, updateTouches, { passive: false });
+  }
 }
 
 // ---- tilt controls (gyro to move, tap anywhere to jump) ----
@@ -194,15 +217,37 @@ function combinedInput() {
 }
 
 // ================= AI =================
+const DIFF = {
+  easy:   { speed: 0.62, err: 55, jumpP: 0.45, lead: 0.15, react: 35 },
+  medium: { speed: 0.85, err: 24, jumpP: 0.75, lead: 0.30, react: 14 },
+  hard:   { speed: 1.00, err: 7,  jumpP: 1.00, lead: 0.42, react: 0  },
+};
+let aiLevel = localStorage.getItem("slimeAI") || "medium";
+if (!DIFF[aiLevel]) aiLevel = "medium";
+
+// per-rally randomness so the AI never plays two rallies identically
+const aiR = { off: 14, jumpDist: 80, smash: true, delay: 0 };
+function rollAI() {
+  const d = DIFF[aiLevel];
+  aiR.off = 14 + (Math.random() * 2 - 1) * d.err;
+  aiR.jumpDist = 55 + Math.random() * 45;
+  aiR.smash = Math.random() < d.jumpP;
+  aiR.delay = d.react * (0.5 + Math.random());
+}
+
+const IDLE = { left: false, right: false, jump: false };
+
 function aiVolley() {
+  if (G.rallyT < aiR.delay) return IDLE; // reaction time after a serve
+  const d = DIFF[aiLevel];
   const s = slimes[1];
   const onMySide = ball.x > W / 2;
   let targetX;
   if (onMySide || ball.vx > 0) {
     const lead = Math.min(20, Math.max(4, (FLOOR_Y - ball.y) / 8));
-    targetX = ball.x + ball.vx * lead * 0.35;
+    targetX = ball.x + ball.vx * lead * d.lead;
     targetX = Math.max(W / 2 + NET_HALF + SLIME_R, Math.min(W - SLIME_R, targetX));
-    targetX += 14; // stand slightly behind the ball so hits go forward
+    targetX += aiR.off; // stand off-center so hits angle forward — varies per rally
   } else {
     targetX = W * 0.72;
   }
@@ -211,13 +256,16 @@ function aiVolley() {
   else if (s.x > targetX + 8) input.left = true;
 
   const dx = ball.x - s.x, dy = ball.y - s.y;
-  if (Math.abs(dx) < 90 && dy > -160 && dy < 0 && ball.vy > -2 && onMySide) input.jump = true;
+  if (aiR.smash && Math.abs(dx) < aiR.jumpDist && dy > -160 && dy < 0 && ball.vy > -2 && onMySide) {
+    input.jump = true;
+  }
   return input;
 }
 
 function aiSoccer() {
+  if (G.rallyT < aiR.delay) return IDLE;
   const s = slimes[1]; // AI attacks the left goal
-  let targetX = ball.x + 34; // stay right of the ball to knock it left
+  let targetX = ball.x + 20 + aiR.off; // stay right of the ball to knock it left
   // ball pinned near own goal: get on top of it instead of pushing it in
   if (targetX > W - SLIME_R - 10) targetX = ball.x;
   targetX = Math.max(SLIME_R, Math.min(W - SLIME_R, targetX));
@@ -227,17 +275,18 @@ function aiSoccer() {
   else if (s.x > targetX + 8) input.left = true;
 
   const dx = ball.x - s.x, dy = ball.y - s.y;
-  const close = Math.abs(dx) < 85;
-  if (close && dy < -30 && dy > -190) input.jump = true;           // ball overhead
-  if (close && ball.x > W - 140 && s.y >= FLOOR_Y) input.jump = true; // clear own corner
+  const close = Math.abs(dx) < aiR.jumpDist;
+  if (aiR.smash && close && dy < -30 && dy > -190) input.jump = true;   // ball overhead
+  if (close && ball.x > W - 140 && s.y >= FLOOR_Y) input.jump = true;   // clear own corner
   return input;
 }
 
 // ================= physics =================
 function stepSlime(s, input) {
+  const sp = SLIME_SPEED * (s.speedMul || 1);
   s.vx = 0;
-  if (input.left) s.vx = -SLIME_SPEED;
-  if (input.right) s.vx = SLIME_SPEED;
+  if (input.left) s.vx = -sp;
+  if (input.right) s.vx = sp;
 
   if (input.jump && s.y >= FLOOR_Y) s.vy = JUMP_VEL;
   s.vy += GRAVITY;
@@ -386,6 +435,8 @@ function startGame(mode) {
   if (IS_TOUCH) goLandscape();
   tilt.cal = tilt.t; // however the phone is held right now = neutral
   G.mode = mode;
+  slimes[0].speedMul = 1;
+  slimes[1].speedMul = mode === "1p" ? DIFF[aiLevel].speed : 1;
   G.score = [0, 0];
   G.server = 0;
   G.running = true;
@@ -659,6 +710,18 @@ if (IS_TOUCH && controlScheme === "tilt") {
   });
 }
 
+function setDiff(level) {
+  aiLevel = level;
+  localStorage.setItem("slimeAI", level);
+  for (const [id, lv] of [["diffEasy", "easy"], ["diffMedium", "medium"], ["diffHard", "hard"]]) {
+    $(id).classList.toggle("sel", lv === aiLevel);
+  }
+}
+$("diffEasy").onclick = () => setDiff("easy");
+$("diffMedium").onclick = () => setDiff("medium");
+$("diffHard").onclick = () => setDiff("hard");
+setDiff(aiLevel);
+
 $("btnVolley").onclick = () => { G.type = "volley"; $("modeTitle").textContent = "\u{1F3D0} VOLLEYBALL"; showScreen("modeMenu"); };
 $("btnSoccer").onclick = () => { G.type = "soccer"; $("modeTitle").textContent = "⚽ SOCCER"; showScreen("modeMenu"); };
 $("btn1p").onclick = () => startGame("1p");
@@ -700,6 +763,10 @@ function update() {
     if (G.mode === "host") sendSnapshot();
     return;
   }
+
+  G.rallyT++;
+  // during long rallies, periodically re-roll the AI's tendencies
+  if (G.mode === "1p" && G.rallyT % 150 === 0) rollAI();
 
   const p2input =
     G.mode === "1p" ? (G.type === "volley" ? aiVolley() : aiSoccer())

@@ -69,6 +69,9 @@
   button:hover { background: #ffe14d; color: #14141f; transform: scale(1.04); }
   button.small { min-width: 0; font-size: 14px; padding: 8px 22px; border-color: #555577; }
   button.small:hover { background: #555577; color: #fff; }
+  #diffRow { display: flex; align-items: center; gap: 10px; color: #8888aa; font-size: 13px; letter-spacing: 1px; }
+  button.diff { padding: 7px 14px; font-size: 13px; }
+  button.diff.sel { border-color: #ffe14d; background: #ffe14d; color: #14141f; }
   .controls { font-size: 13px; color: #aaaacc; line-height: 1.9; }
   .controls b { color: #fff; }
   .hint { color: #666688; font-size: 12px; max-width: 420px; line-height: 1.7; }
@@ -99,30 +102,37 @@
   .pulse { animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 
-  /* touch controls — sized in % of the canvas so they stay inside the
-     ground strip at the bottom and never cover the court */
-  #touchControls { position: absolute; inset: 0; pointer-events: none; display: none; }
+  /* touch controls — the element is a big invisible hit area; the visible
+     circle (::before) is smaller and stays inside the bottom ground strip */
+  #touchControls { position: absolute; inset: 0; pointer-events: none; display: none; touch-action: none; }
   #touchControls.active { display: block; }
   .tbtn {
     position: absolute;
-    bottom: 2.5%;
-    height: 15%;
+    bottom: 0.5%;
+    height: 25%;
     aspect-ratio: 1;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.12);
-    border: 2px solid rgba(255, 255, 255, 0.35);
     color: rgba(255, 255, 255, 0.85);
     font-size: clamp(14px, 4.5vmin, 30px);
     display: flex;
     align-items: center;
     justify-content: center;
     pointer-events: auto;
+    touch-action: none;
     -webkit-tap-highlight-color: transparent;
   }
-  .tbtn.pressed { background: rgba(255, 225, 77, 0.4); }
-  #tLeft { left: 2%; }
-  #tRight { left: 14%; }
-  #tJump { right: 2%; }
+  .tbtn::before {
+    content: "";
+    position: absolute;
+    inset: 17%;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    z-index: -1;
+  }
+  .tbtn.pressed::before { background: rgba(255, 225, 77, 0.4); }
+  #tLeft { left: 0.5%; }
+  #tRight { left: 17%; }
+  #tJump { right: 0.5%; }
 
   /* portrait phones: render the whole app (menus and game) rotated 90° so it
      is always landscape — works even with the phone's rotation lock on */
@@ -152,6 +162,12 @@
   <!-- mode menu -->
   <div class="overlay hidden" id="modeMenu">
     <h2 id="modeTitle">VOLLEYBALL</h2>
+    <div id="diffRow">
+      <span>AI:</span>
+      <button class="small diff" id="diffEasy">EASY</button>
+      <button class="small diff" id="diffMedium">MEDIUM</button>
+      <button class="small diff" id="diffHard">HARD</button>
+    </div>
     <button id="btn1p">1 PLAYER vs AI</button>
     <button id="btn2p">2 PLAYERS &middot; SHARED KEYBOARD</button>
     <button id="btnHost">HOST GAME &middot; OTHER DEVICE</button>
