@@ -89,6 +89,33 @@
   button.teamBtn:disabled { opacity: 0.35; pointer-events: none; }
   #btnStart:disabled { opacity: 0.35; pointer-events: none; }
   #lobbyList { line-height: 1.9; }
+  .sensRow { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #aaaacc; font-size: 13px; letter-spacing: 1px; }
+  .sensRow.hidden { display: none; }
+  #sensSlider { width: 230px; accent-color: #ffe14d; }
+  #sensMeter {
+    position: relative;
+    width: 230px;
+    height: 10px;
+    background: #1c1c30;
+    border: 1px solid #444460;
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  #sensMeterFill {
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 50%;
+    width: 0;
+    background: #ffe14d;
+  }
+  #sensMeterMark {
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 50%;
+    width: 2px;
+    margin-left: -1px;
+    background: #8888aa;
+  }
   .controls { font-size: 13px; color: #aaaacc; line-height: 1.9; }
   .controls b { color: #fff; }
   .hint { color: #666688; font-size: 12px; max-width: 420px; line-height: 1.7; }
@@ -274,6 +301,12 @@
   <div class="overlay hidden" id="pauseScreen">
     <h2>PAUSED</h2>
     <button id="btnResume">RESUME</button>
+    <div class="sensRow hidden" id="sensRow">
+      <label for="sensSlider">GYRO SENSITIVITY: <span id="sensVal">5</span></label>
+      <input type="range" id="sensSlider" min="1" max="10" step="1" value="5">
+      <div id="sensMeter"><div id="sensMeterFill"></div><div id="sensMeterMark"></div></div>
+      <div class="hint">tilt the phone to test</div>
+    </div>
     <button class="small" id="btnQuit">QUIT TO MENU</button>
     <div class="hint">or press P to resume</div>
   </div>

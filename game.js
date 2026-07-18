@@ -173,6 +173,11 @@ if (IS_TOUCH) {
 const tilt = { ax: 0, tap: false, seen: false, listening: false, t: 0, cal: 0, holdA: 90 };
 let controlScheme = localStorage.getItem("slimeControls") || "buttons";
 
+// gyro sensitivity 1..10: sets how many degrees of tilt give full speed
+let gyroSens = parseInt(localStorage.getItem("slimeGyroSens"), 10);
+if (!(gyroSens >= 1 && gyroSens <= 10)) gyroSens = 5;
+function gyroFullAngle() { return 30 - gyroSens * 2.2; } // 1 -> ~28°, 10 -> 8°
+
 function orientationHandler(e) {
   if (e.gamma === null && e.beta === null) return;
   tilt.seen = true;
@@ -197,7 +202,8 @@ function orientationHandler(e) {
   tilt.t = (Math.asin(Math.max(-1, Math.min(1, rightG))) * 180) / Math.PI;
 
   // analog steering: dead zone, then speed scales with tilt up to FULL degrees
-  const DEAD = 3.5, FULL = 17;
+  const FULL = gyroFullAngle();
+  const DEAD = Math.min(3.5, FULL * 0.3);
   const d = tilt.t - tilt.cal;
   // drift the neutral point very slowly while the phone is held still-ish,
   // so a shifting grip doesn't require re-starting the game
@@ -1073,6 +1079,17 @@ $("btnPause").onclick = togglePause;
 $("btnResume").onclick = togglePause;
 $("btnQuit").onclick = backToMenu;
 
+// gyro sensitivity slider (pause menu, touch devices only)
+$("sensRow").classList.toggle("hidden", !IS_TOUCH);
+$("sensSlider").value = gyroSens;
+$("sensVal").textContent = gyroSens;
+$("sensSlider").addEventListener("input", () => {
+  gyroSens = parseInt($("sensSlider").value, 10);
+  $("sensVal").textContent = gyroSens;
+  localStorage.setItem("slimeGyroSens", gyroSens);
+  armTilt(); // slider drag is a gesture — good moment to (re)enable the gyro
+});
+
 // ================= update =================
 function update() {
   if (G.mode === "guest") {
@@ -1320,6 +1337,14 @@ function loop(now) {
     acc -= STEP;
   }
   draw();
+  // live tilt meter while the pause menu is open: tilt to test the response
+  if (IS_TOUCH && !$("pauseScreen").classList.contains("hidden")) {
+    const fill = $("sensMeterFill");
+    const half = 115; // px, half the meter width
+    const w = Math.abs(tilt.ax) * half;
+    fill.style.width = w + "px";
+    fill.style.left = tilt.ax < 0 ? (half - w) + "px" : half + "px";
+  }
 }
 requestAnimationFrame(loop);
 
