@@ -7,7 +7,7 @@ const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
-const SLIME_SPEED = 12;
+const SLIME_SPEED = 10;
 const JUMP_VEL = -11.5;
 
 const NET_HALF = 5;            // volleyball net half-width
