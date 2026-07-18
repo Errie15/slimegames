@@ -211,7 +211,7 @@ function orientationHandler(e) {
   // analog steering: speed scales with tilt up to FULL degrees. The dead
   // zone sits just above sensor noise so crossing the center is seamless.
   const FULL = gyroFullAngle();
-  const DEAD = 0.4;
+  const DEAD = 0.1;
   const d = tilt.t - tilt.cal;
   // re-center only when truly neutral, and very slowly — must never eat a
   // small intentional tilt
@@ -257,8 +257,20 @@ function applyControlScheme() {
   const btn = document.getElementById("btnControls");
   btn.classList.toggle("hidden", !IS_TOUCH);
   btn.textContent = controlScheme === "tilt" ? "CONTROLS: TILT + TAP" : "CONTROLS: BUTTONS";
+  document.getElementById("btnGyroResetMenu")
+    .classList.toggle("hidden", !(IS_TOUCH && controlScheme === "tilt"));
 }
 applyControlScheme();
+
+// manual recalibration: however the phone is held right now becomes neutral
+function resetGyro(feedbackEl) {
+  armTilt();
+  tilt.cal = tilt.t;
+  if (feedbackEl) {
+    feedbackEl.textContent = "gyro reset — this angle is now neutral";
+    setTimeout(() => { if (feedbackEl.textContent.startsWith("gyro reset")) feedbackEl.textContent = ""; }, 2500);
+  }
+}
 
 function wasdInput() {
   return { left: !!keys["KeyA"], right: !!keys["KeyD"], jump: !!keys["KeyW"] };
@@ -1115,6 +1127,8 @@ $("btnCurve").onclick = () => {
   armTilt();
 };
 syncCurveBtn();
+$("btnGyroReset").onclick = () => resetGyro();
+$("btnGyroResetMenu").onclick = () => resetGyro($("ctrlHint"));
 
 // ================= update =================
 function update() {
