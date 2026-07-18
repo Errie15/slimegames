@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slime Games</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #0a0a12;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Courier New", monospace;
+    color: #fff;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block;
+    max-width: 98vw;
+    max-height: 94vh;
+    border: 3px solid #333;
+    border-radius: 6px;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: rgba(5, 5, 15, 0.85);
+    border-radius: 6px;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  h1 {
+    font-size: 42px;
+    letter-spacing: 4px;
+    color: #ffe14d;
+    text-shadow: 0 0 18px rgba(255, 225, 77, 0.4);
+  }
+  h2 { font-size: 24px; letter-spacing: 2px; color: #ffe14d; }
+  .subtitle { color: #8888aa; font-size: 14px; margin-top: -8px; }
+  button {
+    font-family: inherit;
+    font-size: 17px;
+    padding: 11px 30px;
+    background: #1c1c30;
+    color: #fff;
+    border: 2px solid #ffe14d;
+    border-radius: 8px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: background 0.15s, transform 0.1s;
+    min-width: 280px;
+  }
+  button:hover { background: #ffe14d; color: #14141f; transform: scale(1.04); }
+  button.small { min-width: 0; font-size: 14px; padding: 8px 22px; border-color: #555577; }
+  button.small:hover { background: #555577; color: #fff; }
+  .controls { font-size: 13px; color: #aaaacc; line-height: 1.9; }
+  .controls b { color: #fff; }
+  .hint { color: #666688; font-size: 12px; max-width: 420px; line-height: 1.7; }
+  #winText { font-size: 32px; color: #ffe14d; letter-spacing: 2px; }
+  #roomCode {
+    font-size: 56px;
+    letter-spacing: 16px;
+    color: #ffe14d;
+    padding-left: 16px; /* balance the letter-spacing */
+  }
+  #hostUrl { color: #7fd47f; font-size: 15px; line-height: 1.8; }
+  #codeInput {
+    font-family: inherit;
+    font-size: 30px;
+    letter-spacing: 10px;
+    text-align: center;
+    text-transform: uppercase;
+    width: 220px;
+    padding: 10px;
+    background: #14141f;
+    color: #ffe14d;
+    border: 2px solid #555577;
+    border-radius: 8px;
+    outline: none;
+  }
+  #codeInput:focus { border-color: #ffe14d; }
+  #joinStatus, #netError { color: #ff7b7b; font-size: 14px; min-height: 18px; }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+  /* touch controls */
+  #touchControls { position: absolute; inset: 0; pointer-events: none; display: none; }
+  #touchControls.active { display: block; }
+  .tbtn {
+    position: absolute;
+    bottom: 14px;
+    width: 74px;
+    height: 74px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.10);
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tbtn.pressed { background: rgba(255, 225, 77, 0.35); }
+  #tLeft { left: 16px; }
+  #tRight { left: 104px; }
+  #tJump { right: 16px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="1000" height="560"></canvas>
+
+  <!-- main menu: pick a game -->
+  <div class="overlay" id="menu">
+    <h1>SLIME GAMES</h1>
+    <div class="subtitle">a tribute to the classics</div>
+    <button id="btnVolley">&#127952; VOLLEYBALL</button>
+    <button id="btnSoccer">&#9917; SOCCER</button>
+    <div class="controls">
+      <b>Move:</b> A / D or &#9668; / &#9658; &nbsp;&nbsp; <b>Jump:</b> W or &#9650; &nbsp;&nbsp; <b>Pause:</b> P
+    </div>
+    <button class="small hidden" id="btnControls">CONTROLS: BUTTONS</button>
+    <div class="hint" id="ctrlHint"></div>
+  </div>
+
+  <!-- mode menu -->
+  <div class="overlay hidden" id="modeMenu">
+    <h2 id="modeTitle">VOLLEYBALL</h2>
+    <button id="btn1p">1 PLAYER vs AI</button>
+    <button id="btn2p">2 PLAYERS &middot; SHARED KEYBOARD</button>
+    <button id="btnHost">HOST GAME &middot; OTHER DEVICE</button>
+    <button id="btnJoin">JOIN GAME &middot; ROOM CODE</button>
+    <div id="netError"></div>
+    <div class="hint" id="fileHint"></div>
+    <button class="small" id="btnBackMode">&larr; BACK</button>
+  </div>
+
+  <!-- host: waiting room -->
+  <div class="overlay hidden" id="hostScreen">
+    <h2>ROOM CODE</h2>
+    <div id="roomCode">----</div>
+    <div id="hostUrl"></div>
+    <div class="hint pulse">waiting for another player to join&hellip;</div>
+    <button class="small" id="btnCancelHost">CANCEL</button>
+  </div>
+
+  <!-- join screen -->
+  <div class="overlay hidden" id="joinScreen">
+    <h2>ENTER ROOM CODE</h2>
+    <input id="codeInput" maxlength="4" autocomplete="off" spellcheck="false">
+    <div id="joinStatus"></div>
+    <button id="btnDoJoin">JOIN</button>
+    <button class="small" id="btnBackJoin">&larr; BACK</button>
+  </div>
+
+  <!-- win screen -->
+  <div class="overlay hidden" id="winScreen">
+    <div id="winText"></div>
+    <button id="btnRematch">REMATCH</button>
+    <div class="hint hidden pulse" id="guestWait">waiting for host to start a rematch&hellip;</div>
+    <button class="small" id="btnMenu">MENU</button>
+  </div>
+
+  <!-- pause -->
+  <div class="overlay hidden" id="pauseScreen">
+    <h2>PAUSED</h2>
+    <div class="hint">press P to resume</div>
+  </div>
+
+  <!-- disconnect -->
+  <div class="overlay hidden" id="dcScreen">
+    <h2>&#128268; OPPONENT LEFT</h2>
+    <div class="hint" id="dcReason"></div>
+    <button class="small" id="btnDcMenu">MENU</button>
+  </div>
+
+  <!-- touch controls -->
+  <div id="touchControls">
+    <div class="tbtn" id="tLeft">&#9668;</div>
+    <div class="tbtn" id="tRight">&#9658;</div>
+    <div class="tbtn" id="tJump">&#9650;</div>
+  </div>
+</div>
+
+<script src="peerjs.min.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
