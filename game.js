@@ -635,7 +635,7 @@ function startGame(mode) {
 
 function playerNames() {
   switch (G.mode) {
-    case "1p": return ["YOU", "AI"];
+    case "1p": return ["YOU", "BOT"];
     case "host": return ["YOU", "OPPONENT"];
     case "guest": return ["OPPONENT", "YOU"];
     default: return ["PLAYER 1", "PLAYER 2"];
