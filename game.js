@@ -7,8 +7,11 @@ const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
-const SLIME_SPEED = 6.5;
 const JUMP_VEL = -11.5;
+
+// slime speed is adjustable per match (6.5 = the classic feel)
+let gameSpeed = parseFloat(localStorage.getItem("slimeSpeed"));
+if (!(gameSpeed >= 6.5 && gameSpeed <= 10)) gameSpeed = 6.5;
 
 const NET_HALF = 5;            // volleyball net half-width
 const NET_TOP = FLOOR_Y - 70;
@@ -33,6 +36,7 @@ const G = {
   freeze: 0,             // frames of freeze after a point
   flash: null,           // side that just scored
   rallyT: 0,             // frames since the current rally started
+  speed: 6.5,            // slime speed for the active match (host decides online)
 };
 
 const NET = {
@@ -440,7 +444,7 @@ function aiSoccer() {
 
 // ================= physics =================
 function stepSlime(s, input) {
-  const sp = SLIME_SPEED * (s.speedMul || 1);
+  const sp = G.speed * (s.speedMul || 1);
   s.vx = 0;
   if (typeof input.ax === "number") {
     s.vx = sp * Math.max(-1, Math.min(1, input.ax)); // analog (tilt)
@@ -606,6 +610,7 @@ function startGame(mode) {
   armTilt(); // user gesture: re-request gyro permission if iOS dropped it
   tilt.cal = tilt.t; // however the phone is held right now = neutral
   G.mode = mode;
+  if (mode !== "guest") G.speed = gameSpeed; // guests get it from the host
   if (mode === "1p" || mode === "2p") roster = defaultRoster();
   buildSlimes();
   if (mode === "1p") slimes[1].speedMul = DIFF[aiLevel].speed;
@@ -835,7 +840,7 @@ function hostStart() {
   for (const [gid, p] of LOBBY.players) add(p.team, gid);
   myTeam = LOBBY.hostTeam;
   for (const gid of LOBBY.players.keys()) {
-    netSendTo(gid, { t: "start", game: G.type, roster, you: gid });
+    netSendTo(gid, { t: "start", game: G.type, roster, you: gid, sp: gameSpeed });
   }
   startGame("host");
 }
@@ -918,6 +923,7 @@ function handleNetMessage(msg) {
       roster = msg.roster;
       myTeam = (roster.find((e) => e.gid === msg.you) || roster[0]).team;
       startGame("guest");
+      G.speed = typeof msg.sp === "number" ? msg.sp : 6.5; // host's choice
       break;
     case "error":
       $("joinStatus").textContent = msg.reason || "Something went wrong.";
@@ -1214,6 +1220,15 @@ $("diffEasy").onclick = () => setDiff("easy");
 $("diffMedium").onclick = () => setDiff("medium");
 $("diffHard").onclick = () => setDiff("hard");
 setDiff(aiLevel);
+
+// per-match speed slider (host's value rules online matches)
+$("speedSlider").value = gameSpeed;
+$("speedVal").textContent = gameSpeed.toFixed(1);
+$("speedSlider").addEventListener("input", () => {
+  gameSpeed = parseFloat($("speedSlider").value);
+  $("speedVal").textContent = gameSpeed.toFixed(1);
+  localStorage.setItem("slimeSpeed", gameSpeed);
+});
 
 $("btnVolley").onclick = () => { G.type = "volley"; $("modeTitle").textContent = "\u{1F3D0} VOLLEYBALL"; showScreen("modeMenu"); };
 $("btnSoccer").onclick = () => { G.type = "soccer"; $("modeTitle").textContent = "⚽ SOCCER"; showScreen("modeMenu"); };
