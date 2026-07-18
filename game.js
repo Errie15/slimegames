@@ -576,6 +576,10 @@ function hostGame() {
   if (NET.lan) {
     NET.role = "host";
     connect(() => netSend({ t: "create", game: G.type }));
+  } else if (!navigator.onLine) {
+    $("netError").textContent = "No internet — 1P and 2P modes still work offline.";
+    $("fileHint").innerHTML =
+      "For two devices on the same WiFi without internet,<br>run <b>node server.js</b> on a computer and open the address it prints.";
   } else {
     peerHost();
   }
@@ -857,3 +861,8 @@ function loop(now) {
   draw();
 }
 requestAnimationFrame(loop);
+
+// offline support: after one online visit the game loads with no connection
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}

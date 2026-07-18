@@ -1,13 +1,24 @@
 # Slime Games 🏐⚽
 
 Slime Volleyball + Slime Soccer — playable solo vs AI, two players on one
-keyboard, or two players on **different devices over your WiFi** (no internet,
-no accounts, no app stores).
+keyboard, two players over the **internet**, or two devices on the same
+**WiFi with no internet at all** (no accounts, no app stores).
+
+## Play online (hosted on GitHub Pages)
+
+Open the site, pick a game → **HOST GAME**, and share the 4-letter code.
+Your friend opens the same site anywhere in the world and hits **JOIN GAME**.
+The connection is peer-to-peer (WebRTC); a free broker only does the
+introduction.
+
+The site is a PWA: after one visit with internet, it **loads and plays
+offline** (1P vs AI and shared-keyboard 2P). Add it to your phone's home
+screen for the full-screen app feel.
 
 ## Play locally (single device)
 
-Just open `index.html` in a browser. 1P and 2P shared-keyboard modes work
-straight from the file.
+Just open `index.html` in a browser — or revisit the hosted URL offline.
+1P and 2P shared-keyboard modes work with no connection.
 
 ## Play across devices (same WiFi)
 
