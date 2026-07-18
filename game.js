@@ -48,6 +48,9 @@ const NET = {
   inSeq: 0,              // guest side: outgoing input seq
   lastSeq: 0,            // guest side: newest state seq received
   snaps: [],             // guest side: buffered snapshots for interpolation
+  myIdx: -1,             // guest side: index of own slime in the roster
+  gapEma: 40,            // guest side: smoothed ms between snapshots
+  lastAt: 0,
   lan: false,            // true when the local relay server is reachable
   connected: false,
   role: null,
@@ -520,6 +523,9 @@ function startGame(mode) {
   NET.lastState = null;
   NET.snaps = [];
   NET.lastSeq = 0;
+  NET.lastAt = 0;
+  NET.gapEma = 40;
+  NET.myIdx = mode === "guest" ? roster.findIndex((e) => e.gid === NET.myGid) : -1;
   resetRally(0);
   hideAllScreens();
   $("btnPause").classList.remove("hidden");
@@ -780,13 +786,17 @@ function handleNetMessage(msg) {
     case "error":
       $("joinStatus").textContent = msg.reason || "Something went wrong.";
       break;
-    case "state":
+    case "state": {
       if (msg.q && msg.q <= NET.lastSeq) break; // stale (unordered channel)
       NET.lastSeq = msg.q || NET.lastSeq;
       NET.lastState = msg;
-      NET.snaps.push({ at: performance.now(), p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz });
+      const now = performance.now();
+      if (NET.lastAt) NET.gapEma = NET.gapEma * 0.9 + Math.min(200, now - NET.lastAt) * 0.1;
+      NET.lastAt = now;
+      NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz });
       if (NET.snaps.length > 30) NET.snaps.shift();
       break;
+    }
     case "end":
       endGame(msg.w);
       break;
@@ -1098,7 +1108,8 @@ function update() {
     if (typeof i.ax === "number") msg.a = Math.round(i.ax * 100) / 100;
     if (NET.fast && NET.fast.open) NET.fast.send(msg); // low-latency lane
     else netSend(msg);
-    return; // guest doesn't simulate — it renders host snapshots
+    predictSelf(i); // own slime moves instantly; the host stays authoritative
+    return;
   }
 
   if (G.freeze > 0) {
@@ -1142,6 +1153,26 @@ function update() {
   if (G.mode === "host") sendSnapshot();
 }
 
+// Client-side prediction: the guest simulates its OWN slime locally every
+// frame so movement and jumps feel instant, then softly reconciles toward
+// the host's authoritative position when they drift apart.
+function predictSelf(input) {
+  const s = NET.myIdx >= 0 ? slimes[NET.myIdx] : null;
+  if (!s) return;
+  stepSlime(s, input);
+  const st = NET.lastState;
+  const sp = st && st.p[NET.myIdx];
+  if (!sp) return;
+  if (st.fz > 0) { // rally reset: snap to the server's spawn position
+    s.x = sp[0]; s.y = sp[1]; s.vx = 0; s.vy = 0;
+    return;
+  }
+  const ex = sp[0] - s.x, ey = sp[1] - s.y;
+  const d2 = ex * ex + ey * ey;
+  if (d2 > 140 * 140) { s.x = sp[0]; s.y = sp[1]; }          // way off: snap
+  else if (d2 > 40 * 40) { s.x += ex * 0.15; s.y += ey * 0.15; } // drifted: blend
+}
+
 let stateSeq = 0;
 function sendSnapshot() {
   const rnd = (v) => Math.round(v * 10) / 10;
@@ -1169,11 +1200,13 @@ function sendSnapshot() {
 // what to draw this frame (live sim, or the latest network snapshot)
 function view() {
   if (G.mode === "guest" && NET.snaps.length) {
-    // render ~80ms behind the newest snapshot, interpolating between the two
-    // surrounding ones — smooths network jitter into fluid motion
+    // render slightly behind the newest snapshot, interpolating between the
+    // two surrounding ones — smooths network jitter into fluid motion. The
+    // delay adapts to the actual snapshot rate. Own slime: local prediction.
     const S = NET.snaps;
     const newest = S[S.length - 1];
-    const target = performance.now() - 80;
+    const delay = Math.min(120, Math.max(35, NET.gapEma * 2 + 8));
+    const target = performance.now() - delay;
     let s0 = S[0], s1 = newest;
     for (let i = S.length - 1; i >= 0; i--) {
       if (S[i].at <= target) { s0 = S[i]; s1 = S[i + 1] || S[i]; break; }
@@ -1182,12 +1215,17 @@ function view() {
     const f = span > 0 ? Math.min(1, Math.max(0, (target - s0.at) / span)) : 1;
     const L = (a, b) => a + (b - a) * f;
     return {
-      slimes: newest.p.map((_, i) => ({
-        x: s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : newest.p[i][0],
-        y: s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : newest.p[i][1],
-        side: roster[i] ? roster[i].team : 0,
-        color: roster[i] ? roster[i].color : "#fff",
-      })),
+      slimes: newest.p.map((_, i) => {
+        if (i === NET.myIdx && slimes[i]) {
+          return { x: slimes[i].x, y: slimes[i].y, side: slimes[i].side, color: slimes[i].color };
+        }
+        return {
+          x: s0.p[i] && s1.p[i] ? L(s0.p[i][0], s1.p[i][0]) : newest.p[i][0],
+          y: s0.p[i] && s1.p[i] ? L(s0.p[i][1], s1.p[i][1]) : newest.p[i][1],
+          side: roster[i] ? roster[i].team : 0,
+          color: roster[i] ? roster[i].color : "#fff",
+        };
+      }),
       ball: { x: L(s0.b[0], s1.b[0]), y: L(s0.b[1], s1.b[1]) },
       score: newest.sc,
       flash: newest.fl,
