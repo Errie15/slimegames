@@ -37,10 +37,7 @@ const G = {
   flash: null,           // side that just scored
   rallyT: 0,             // frames since the current rally started
   speed: 6.5,            // slime speed for the active match (host decides online)
-  awaitServe: false,     // between rounds: everyone must press jump to continue
-  ready: new Set(),      // players who have confirmed
-  armed: new Set(),      // players who released jump since the round ended
-  readyTotal: 0,
+  countdown: 0,          // frames left of the 3-2-1 between rounds
 };
 
 const NET = {
@@ -624,9 +621,7 @@ function startGame(mode) {
   G.paused = false;
   G.freeze = 0;
   G.flash = null;
-  G.awaitServe = false;
-  G.ready.clear();
-  G.armed.clear();
+  G.countdown = 0;
   NET.lastState = null;
   NET.snaps = [];
   NET.lastSeq = 0;
@@ -946,7 +941,7 @@ function handleNetMessage(msg) {
         NET.jitEma = (NET.jitEma || 0) * 0.9 + Math.abs(gap - NET.gapEma) * 0.1;
       }
       NET.lastAt = now;
-      NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz, aw: msg.aw, rd: msg.rd, tot: msg.tot });
+      NET.snaps.push({ at: now, p: msg.p, b: msg.b, sc: msg.sc, fl: msg.fl, fz: msg.fz, cd: msg.cd });
       if (NET.snaps.length > 30) NET.snaps.shift();
       break;
     }
@@ -1325,24 +1320,16 @@ function update() {
         endGame(winner);
         return;
       }
-      // everyone confirms before the next round starts
-      G.awaitServe = true;
-      G.ready.clear();
-      G.armed.clear();
+      // 3-2-1 countdown before the next round starts
+      G.countdown = 180;
     }
     if (G.mode === "host") sendSnapshot();
     return;
   }
 
-  if (G.awaitServe) {
-    const parts = participants();
-    G.readyTotal = parts.length;
-    for (const p of parts) {
-      if (!p.jump) G.armed.add(p.key);              // must release jump first…
-      else if (G.armed.has(p.key)) G.ready.add(p.key); // …then press = ready
-    }
-    if (parts.length && parts.every((p) => G.ready.has(p.key))) {
-      G.awaitServe = false;
+  if (G.countdown > 0) {
+    G.countdown--;
+    if (G.countdown === 0) {
       G.flash = null;
       resetRally(G.server);
     }
@@ -1398,7 +1385,7 @@ function predictSelf(input) {
   const st = NET.lastState;
   const sp = st && st.p[NET.myIdx];
   if (!sp) return;
-  if (st.fz > 0 || st.aw) { // rally frozen / waiting for ready: follow server
+  if (st.fz > 0 || st.cd) { // rally frozen / countdown: follow the server
     s.x = sp[0]; s.y = sp[1]; s.vx = 0; s.vy = 0;
     return;
   }
@@ -1406,26 +1393,6 @@ function predictSelf(input) {
   const d2 = ex * ex + ey * ey;
   if (d2 > 120 * 120) { s.x = sp[0]; s.y = sp[1]; }          // way off: snap
   else if (d2 > 24 * 24) { s.x += ex * 0.22; s.y += ey * 0.22; } // drifted: blend
-}
-
-// who has to confirm before the next round
-function participants() {
-  if (G.mode === "host") {
-    const out = [{ key: "host", jump: combinedInput().jump }];
-    for (const e of roster) {
-      if (e.gid === null) continue;
-      const connected = NET.lan ? LOBBY.players.has(e.gid) : NET.guests.has(e.gid);
-      if (connected) out.push({ key: e.gid, jump: !!(NET.inputs.get(e.gid) || {}).jump });
-    }
-    return out;
-  }
-  if (G.mode === "2p") {
-    return [
-      { key: "p1", jump: wasdInput().jump || touch.j },
-      { key: "p2", jump: arrowInput().jump },
-    ];
-  }
-  return [{ key: "p1", jump: combinedInput().jump }]; // 1p (the bot is always ready)
 }
 
 let stateSeq = 0;
@@ -1439,9 +1406,7 @@ function sendSnapshot() {
     sc: G.score,
     fl: G.flash,
     fz: G.freeze,
-    aw: G.awaitServe ? 1 : 0,
-    rd: G.ready.size,
-    tot: G.readyTotal,
+    cd: Math.ceil(G.countdown / 60), // 3, 2, 1 or 0
   };
   if (NET.lan) {
     netSendAll(obj);
@@ -1502,14 +1467,12 @@ function view() {
       score: newest.sc,
       flash: newest.fl,
       freeze: newest.fz,
-      await: !!newest.aw,
-      rd: newest.rd || 0,
-      tot: newest.tot || 0,
+      cd: newest.cd || 0,
     };
   }
   return {
     slimes, ball, score: G.score, flash: G.flash, freeze: G.freeze,
-    await: G.awaitServe, rd: G.ready.size, tot: G.readyTotal,
+    cd: Math.ceil(G.countdown / 60),
   };
 }
 
@@ -1656,14 +1619,14 @@ function draw() {
 
   // connection quality readout during network games
   if ((G.mode === "host" || G.mode === "guest") && G.running && NET.rtt) {
-    ctx.fillStyle = "rgba(255,255,255,0.45)";
-    ctx.font = "12px 'Courier New', monospace";
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = "bold 17px 'Courier New', monospace";
     const lane = G.mode === "guest" && !NET.lan && !(NET.fast && NET.fast.open) ? " · TCP" : "";
     const jit = NET.jitEma > 12 ? ` · JITTER ${Math.round(NET.jitEma)}` : "";
-    ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}${lane}${jit}`, 12, H - 10);
+    ctx.fillText(`PING ${Math.round(NET.rtt)}ms${NET.route ? " · " + NET.route : ""}${lane}${jit}`, 14, 64);
   }
 
-  if (v.flash !== null && v.flash !== undefined && (v.freeze > 0 || v.await)) {
+  if (v.flash !== null && v.flash !== undefined && (v.freeze > 0 || v.cd > 0)) {
     ctx.fillStyle = "#ffe14d";
     ctx.font = "bold 28px 'Courier New', monospace";
     ctx.textAlign = "center";
@@ -1674,11 +1637,11 @@ function draw() {
     ctx.textAlign = "left";
   }
 
-  if (v.await) {
+  if (v.cd > 0) {
     ctx.fillStyle = "#fff";
-    ctx.font = "bold 22px 'Courier New', monospace";
+    ctx.font = "bold 84px 'Courier New', monospace";
     ctx.textAlign = "center";
-    ctx.fillText(`NEXT ROUND — PRESS JUMP WHEN READY (${v.rd}/${v.tot})`, W / 2, 170);
+    ctx.fillText(String(v.cd), W / 2, 250);
     ctx.textAlign = "left";
   }
 }
