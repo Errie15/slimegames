@@ -7,7 +7,7 @@ const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
-const SLIME_SPEED = 8;
+const SLIME_SPEED = 6.5;
 const JUMP_VEL = -11.5;
 
 const NET_HALF = 5;            // volleyball net half-width
@@ -254,21 +254,53 @@ function enableTilt() {
   });
 }
 
-// tap anywhere on the court to jump (tilt mode only)
-canvas.addEventListener("touchstart", (e) => {
-  if (controlScheme === "tilt") { e.preventDefault(); tilt.tap = true; }
-}, { passive: false });
-canvas.addEventListener("touchend", (e) => {
-  if (controlScheme === "tilt") { e.preventDefault(); tilt.tap = false; }
-}, { passive: false });
-canvas.addEventListener("touchcancel", () => { tilt.tap = false; }, { passive: false });
+// ---- finger steering: hold a finger where you want the slime to go,
+// touch with a second finger to jump ----
+const finger = { active: false, targetX: 0, jump: false };
+
+function gameXFromTouch(t) {
+  const rect = canvas.getBoundingClientRect();
+  // in forced-landscape (CSS-rotated) mode the game's x-axis runs along the
+  // screen's vertical axis
+  const rotated = matchMedia("(orientation: portrait) and (pointer: coarse)").matches;
+  const frac = rotated
+    ? (t.clientY - rect.top) / rect.height
+    : (t.clientX - rect.left) / rect.width;
+  return Math.max(0, Math.min(1, frac)) * W;
+}
+
+function canvasTouch(e) {
+  if (controlScheme === "tilt") {
+    e.preventDefault();
+    tilt.tap = e.touches.length > 0; // tap anywhere to jump
+  } else if (controlScheme === "finger") {
+    e.preventDefault();
+    finger.active = e.touches.length > 0;
+    finger.jump = e.touches.length >= 2;
+    if (e.touches.length > 0) finger.targetX = gameXFromTouch(e.touches[0]);
+  }
+}
+for (const ev of ["touchstart", "touchmove", "touchend", "touchcancel"]) {
+  canvas.addEventListener(ev, canvasTouch, { passive: false });
+}
+
+// the slime this client actually controls (predicted one for guests)
+function mySlime() {
+  if (G.mode === "guest") return slimes[NET.myIdx] || slimes[0];
+  if (G.mode === "host") return slimes.find((s) => s.gid === null) || slimes[0];
+  return slimes[0];
+}
 
 function applyControlScheme() {
   document.getElementById("touchControls")
     .classList.toggle("active", IS_TOUCH && controlScheme === "buttons");
   const btn = document.getElementById("btnControls");
   btn.classList.toggle("hidden", !IS_TOUCH);
-  btn.textContent = controlScheme === "tilt" ? "CONTROLS: TILT + TAP" : "CONTROLS: BUTTONS";
+  btn.textContent = {
+    buttons: "CONTROLS: BUTTONS",
+    tilt: "CONTROLS: TILT + TAP",
+    finger: "CONTROLS: FINGER",
+  }[controlScheme] || "CONTROLS: BUTTONS";
   document.getElementById("sensRow")
     .classList.toggle("hidden", !(IS_TOUCH && controlScheme === "tilt"));
 }
@@ -318,11 +350,17 @@ function combinedInput() {
   const a = wasdInput(), b = arrowInput();
   const left = a.left || b.left || touch.l;
   const right = a.right || b.right || touch.r;
-  const jump = a.jump || b.jump || touch.j || (controlScheme === "tilt" && tilt.tap);
+  const jump = a.jump || b.jump || touch.j
+    || (controlScheme === "tilt" && tilt.tap)
+    || (controlScheme === "finger" && finger.jump);
   let ax;
   if (left) ax = -1;
   else if (right) ax = 1;
   else if (controlScheme === "tilt" && tilt.seen) ax = tilt.ax;
+  else if (controlScheme === "finger" && finger.active) {
+    const s = mySlime();
+    if (s) ax = Math.max(-1, Math.min(1, (finger.targetX - s.x) / 50));
+  }
   return { left, right, jump, ax };
 }
 
@@ -1088,16 +1126,19 @@ $("btnControls").onclick = async () => {
   if (controlScheme === "buttons") {
     $("ctrlHint").textContent = "checking gyroscope…";
     const ok = await enableTilt();
-    if (!ok) {
-      $("ctrlHint").textContent = window.isSecureContext
-        ? "No gyroscope data — tilt controls need a phone or tablet."
-        : "Phones only allow gyro on a secure page — open the https:// address the server prints, then try again.";
-      return;
+    if (ok) {
+      controlScheme = "tilt";
+      $("ctrlHint").textContent = "Tilt to move, tap anywhere to jump.";
+    } else {
+      controlScheme = "finger";
+      $("ctrlHint").textContent = "No gyro — FINGER mode: hold a finger where you want to go, second finger jumps.";
     }
-    controlScheme = "tilt";
-    $("ctrlHint").textContent = "Tilt to move, tap anywhere to jump.";
+  } else if (controlScheme === "tilt") {
+    controlScheme = "finger";
+    $("ctrlHint").textContent = "Hold a finger where you want to go — touch with a second finger to jump.";
   } else {
     controlScheme = "buttons";
+    $("ctrlHint").textContent = "";
   }
   localStorage.setItem("slimeControls", controlScheme);
   applyControlScheme();
@@ -1244,8 +1285,8 @@ function predictSelf(input) {
   }
   const ex = sp[0] - s.x, ey = sp[1] - s.y;
   const d2 = ex * ex + ey * ey;
-  if (d2 > 140 * 140) { s.x = sp[0]; s.y = sp[1]; }          // way off: snap
-  else if (d2 > 40 * 40) { s.x += ex * 0.15; s.y += ey * 0.15; } // drifted: blend
+  if (d2 > 120 * 120) { s.x = sp[0]; s.y = sp[1]; }          // way off: snap
+  else if (d2 > 24 * 24) { s.x += ex * 0.22; s.y += ey * 0.22; } // drifted: blend
 }
 
 let stateSeq = 0;
