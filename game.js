@@ -7,7 +7,7 @@ const H = 640;              // extra ground below the floor = touch-control zone
 const FLOOR_Y = 500;
 const SLIME_R = 46;
 const GRAVITY = 0.42;
-const SLIME_SPEED = 6.5;
+const SLIME_SPEED = 8;
 const JUMP_VEL = -11.5;
 
 const NET_HALF = 5;            // volleyball net half-width
@@ -257,18 +257,40 @@ function applyControlScheme() {
   const btn = document.getElementById("btnControls");
   btn.classList.toggle("hidden", !IS_TOUCH);
   btn.textContent = controlScheme === "tilt" ? "CONTROLS: TILT + TAP" : "CONTROLS: BUTTONS";
-  document.getElementById("btnGyroResetMenu")
+  document.getElementById("sensRow")
     .classList.toggle("hidden", !(IS_TOUCH && controlScheme === "tilt"));
 }
 applyControlScheme();
 
-// manual recalibration: however the phone is held right now becomes neutral
-function resetGyro(feedbackEl) {
-  armTilt();
-  tilt.cal = tilt.t;
-  if (feedbackEl) {
-    feedbackEl.textContent = "gyro reset — this angle is now neutral";
-    setTimeout(() => { if (feedbackEl.textContent.startsWith("gyro reset")) feedbackEl.textContent = ""; }, 2500);
+// the gyro settings panel lives in one place at a time: main menu or pause
+function placeGyroPanel(slotId) {
+  const panel = document.getElementById("sensRow");
+  const slot = document.getElementById(slotId);
+  if (panel && slot && panel.parentElement !== slot) slot.appendChild(panel);
+}
+
+// manual recalibration: however the phone is held right now becomes neutral.
+// Waits for a fresh sensor reading — resetting before the gyro is armed used
+// to capture a stale zero and do nothing.
+function resetGyro() {
+  const hint = document.getElementById("gyroHint");
+  const apply = () => {
+    tilt.cal = tilt.t;
+    hint.textContent = "gyro reset — this angle is now neutral";
+    setTimeout(() => {
+      if (hint.textContent.startsWith("gyro reset")) {
+        hint.textContent = "hold the phone how you want, tap reset — then tilt to test";
+      }
+    }, 2500);
+  };
+  if (!tilt.seen) {
+    hint.textContent = "activating gyro…";
+    enableTilt().then((ok) => {
+      if (ok) setTimeout(apply, 150); // let a fresh reading land first
+      else hint.textContent = "no gyro data — check motion permission";
+    });
+  } else {
+    apply();
   }
 }
 
@@ -510,6 +532,7 @@ const $ = (id) => document.getElementById(id);
 const screens = ["menu", "modeMenu", "hostScreen", "joinScreen", "teamScreen", "winScreen", "pauseScreen", "dcScreen"];
 function showScreen(id) {
   for (const s of screens) $(s).classList.toggle("hidden", s !== id);
+  if (id === "menu") placeGyroPanel("gyroSlotMenu");
 }
 function hideAllScreens() {
   for (const s of screens) $(s).classList.add("hidden");
@@ -580,6 +603,7 @@ function togglePause() {
   if (!G.running) return;
   if (G.mode === "guest") { netSend({ t: "pauseReq" }); return; } // host decides
   G.paused = !G.paused;
+  if (G.paused) placeGyroPanel("gyroSlotPause");
   $("pauseScreen").classList.toggle("hidden", !G.paused);
   if (G.mode === "host") netSendAll({ t: "pause", on: G.paused });
 }
@@ -823,6 +847,7 @@ function handleNetMessage(msg) {
       break;
     case "pause":
       G.paused = msg.on;
+      if (msg.on) placeGyroPanel("gyroSlotPause");
       $("pauseScreen").classList.toggle("hidden", !msg.on);
       break;
     case "peer-left":
@@ -1107,8 +1132,7 @@ $("btnPause").onclick = togglePause;
 $("btnResume").onclick = togglePause;
 $("btnQuit").onclick = backToMenu;
 
-// gyro sensitivity slider (pause menu, touch devices only)
-$("sensRow").classList.toggle("hidden", !IS_TOUCH);
+// gyro sensitivity slider (main menu + pause menu, touch devices only)
 $("sensSlider").value = gyroSens;
 $("sensVal").textContent = gyroSens;
 $("sensSlider").addEventListener("input", () => {
@@ -1127,8 +1151,7 @@ $("btnCurve").onclick = () => {
   armTilt();
 };
 syncCurveBtn();
-$("btnGyroReset").onclick = () => resetGyro();
-$("btnGyroResetMenu").onclick = () => resetGyro($("ctrlHint"));
+$("btnGyroReset").onclick = resetGyro;
 
 // ================= update =================
 function update() {

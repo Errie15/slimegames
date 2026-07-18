@@ -232,7 +232,16 @@
       <b>Move:</b> A / D or &#9668; / &#9658; &nbsp;&nbsp; <b>Jump:</b> W or &#9650; &nbsp;&nbsp; <b>Pause:</b> P
     </div>
     <button class="small hidden" id="btnControls">CONTROLS: BUTTONS</button>
-    <button class="small hidden" id="btnGyroResetMenu">&#8634; RESET GYRO</button>
+    <div id="gyroSlotMenu">
+      <div class="sensRow hidden" id="sensRow">
+        <label for="sensSlider">GYRO SENSITIVITY: <span id="sensVal">5</span></label>
+        <input type="range" id="sensSlider" min="1" max="10" step="1" value="5">
+        <button class="small" id="btnCurve">MOVEMENT: LINEAR</button>
+        <button class="small" id="btnGyroReset">&#8634; RESET GYRO</button>
+        <div id="sensMeter"><div id="sensMeterFill"></div><div id="sensMeterMark"></div></div>
+        <div class="hint" id="gyroHint">hold the phone how you want, tap reset — then tilt to test</div>
+      </div>
+    </div>
     <div class="hint" id="ctrlHint"></div>
   </div>
 
@@ -302,14 +311,7 @@
   <div class="overlay hidden" id="pauseScreen">
     <h2>PAUSED</h2>
     <button id="btnResume">RESUME</button>
-    <div class="sensRow hidden" id="sensRow">
-      <label for="sensSlider">GYRO SENSITIVITY: <span id="sensVal">5</span></label>
-      <input type="range" id="sensSlider" min="1" max="10" step="1" value="5">
-      <button class="small" id="btnCurve">MOVEMENT: LINEAR</button>
-      <button class="small" id="btnGyroReset">&#8634; RESET GYRO</button>
-      <div id="sensMeter"><div id="sensMeterFill"></div><div id="sensMeterMark"></div></div>
-      <div class="hint">hold the phone how you want, tap reset — then tilt to test</div>
-    </div>
+    <div id="gyroSlotPause"></div>
     <button class="small" id="btnQuit">QUIT TO MENU</button>
     <div class="hint">or press P to resume</div>
   </div>
